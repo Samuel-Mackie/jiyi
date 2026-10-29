@@ -261,6 +261,46 @@ input[type=range]{width:100%;accent-color:var(--cobalt);margin:6px 0}
 .status:empty{display:none}
 .status.err{color:var(--again)}
 .status.ok{color:var(--easy)}
+
+/* folders */
+.chips{display:flex;gap:8px;overflow-x:auto;margin:0 -18px 10px;padding:2px 18px 4px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.chips::-webkit-scrollbar{display:none}
+.fchip{flex:none;display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:6px 14px;font-size:14.5px;font-weight:500;white-space:nowrap;min-height:38px}
+.fchip b{font-weight:600;color:var(--muted);margin-left:4px;font-variant-numeric:tabular-nums}
+.fchip svg{width:14px;height:14px}
+.fchip[aria-pressed="true"]{background:var(--cobalt);border-color:var(--cobalt);color:var(--cobalt-ink)}
+.fchip[aria-pressed="true"] b{color:inherit;opacity:.8}
+.fchip.add{border-style:dashed;border-color:var(--grid-strong);color:var(--cobalt)}
+.fsel{display:flex;flex-wrap:wrap;gap:8px}
+.folder-tools{display:flex;flex-wrap:wrap;gap:0 16px;margin:-2px 0 8px}
+.inline-form{display:flex;gap:8px;margin-bottom:2px}
+.inline-form .in{flex:1;min-width:0}
+.inline-form .btn{width:auto;flex:none;padding:0 18px;min-height:48px;font-size:16px}
+.pick-bar{display:flex;align-items:center;gap:12px;justify-content:space-between;margin-bottom:10px;font-size:14.5px;color:var(--muted)}
+.btn.compact{width:auto;min-height:40px;padding:0 18px;font-size:15px;flex:none}
+.check{width:26px;height:26px;border-radius:50%;border:1.5px solid var(--grid-strong);display:grid;place-items:center;color:transparent}
+.check svg{width:15px;height:15px}
+.row.on .check{background:var(--cobalt);border-color:var(--cobalt);color:var(--cobalt-ink)}
+.seg{display:grid;grid-template-columns:1fr 1fr;background:var(--line-soft);border-radius:12px;padding:3px;margin-bottom:18px}
+.seg button{border:0;background:none;border-radius:10px;min-height:40px;font-size:15px;font-weight:500;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.1)}
+.switch .hint{margin-top:2px}
+.switch.field{padding:2px 0}
+.scope-row{display:flex;align-items:center;gap:14px;margin:0 0 6px;min-height:40px}
+.scope-sel{max-width:62%;font-family:var(--ui);font-size:15px;font-weight:600;color:var(--cobalt);background-color:var(--cobalt-soft);border:0;border-radius:999px;padding:7px 30px 7px 14px;-webkit-appearance:none;appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--cobalt) 50%),linear-gradient(135deg,var(--cobalt) 50%,transparent 50%);background-position:calc(100% - 17px) 52%,calc(100% - 12px) 52%;background-size:5px 5px;background-repeat:no-repeat;text-overflow:ellipsis}
+.scope-label{font-size:15px;font-weight:600;color:var(--cobalt)}
+.scope-row .undo{margin-left:auto}
+
+/* vocabulary stats */
+.vocab-num{font-size:42px;font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums;margin:2px 0 6px;display:flex;align-items:baseline;gap:8px}
+.vocab-num span{font-size:17px;font-weight:500;color:var(--muted)}
+.fc.fc12,.fc-days.fc12{grid-template-columns:repeat(12,1fr)}
+.fc .bar.past{opacity:.55}
+.fc-days.fc12 span{white-space:nowrap;text-align:left}
+.folder-stats{margin-top:18px;display:grid;gap:12px}
+.fs-top{display:flex;justify-content:space-between;gap:12px;font-size:15px;font-weight:500}
+.fs-top .muted{font-size:14px;font-weight:400;white-space:nowrap}
+.fs-row .meter{margin:6px 0 0}
 </style>
 </head>
 <body>
@@ -290,7 +330,7 @@ input[type=range]{width:100%;accent-color:var(--cobalt);margin:6px 0}
     <button class="tab" data-act="tab" data-view="add">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3.5" y="3.5" width="17" height="17" rx="4"/><path d="M12 8v8M8 12h8"/></svg>Add</button>
     <button class="tab" data-act="tab" data-view="cards">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6"/></svg>Cards</button>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6"/></svg>Words</button>
     <button class="tab" data-act="tab" data-view="stats">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 20v-8M12 20V5M19 20v-5M3 20.5h18"/></svg>Stats</button>
   </nav>

@@ -14,7 +14,7 @@ const MAX_IVL = 36500, DAY_START_HOUR = 4;
 const W = [0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046, 1.54575, 0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315, 2.9898, 0.51655, 0.6621];
 const DECAY = -0.5, FACTOR = 19 / 81;
 const DEFAULTS = { rate: 0.9, autoplay: true, newPerDay: 15, retention: 0.9, toneColors: true, extra: { day: '', n: 0 }, mod: 0 };
-const PREF_DEFAULTS = { voice: '', voiceName: '', azKey: '', azRegion: '', ghToken: '', gistId: '' };
+const PREF_DEFAULTS = { voice: '', voiceName: '', azKey: '', azRegion: '', ghToken: '', gistId: '', scope: 'all' };
 const LS_DECK = 'jiyi-deck-v2', LS_PREFS = 'jiyi-prefs-v1';
 const GIST_FILE = 'jiyi-deck.json';
 const LOG_DAYS = 35;
@@ -34,18 +34,24 @@ const HAN = /\p{Script=Han}/u;
 
 const ICON = {
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 5v14l11.5-7z" fill="currentColor"/></svg>',
-  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>'
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>'
 };
 const GRID_SVG = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" fill="none" stroke="currentColor"><path d="M0 50H100M50 0V100" stroke-width="1" stroke-dasharray="4 3.5"/><path d="M0 0L100 100M100 0L0 100" stroke-width=".8" stroke-dasharray="2 4" opacity=".6"/></svg>';
 
 /* ---------- state ---------- */
-const state = { cards: new Map(), settings: { ...DEFAULTS }, logs: new Map(), days: new Map(), tomb: new Map(), undone: new Map() };
+const state = { cards: new Map(), settings: { ...DEFAULTS }, logs: new Map(), days: new Map(), tomb: new Map(), undone: new Map(), folders: new Map(), ftomb: new Map() };
 let prefs = { ...PREF_DEFAULTS };
 let study = { id: null, revealed: false, animate: false };
 let lastUndo = null;
 let currentView = 'study';
 let addForm = null, editing = null;
 let refreshTimer = null;
+let cram = null;                                   // 'practice the whole folder' session
+let words = { filter: 'practice', mode: 'list', tools: '' };
+let addMode = 'one';
+const SAVE_BTN = '<button class="btn" data-act="save-new">Save card</button>';
+const BULK_BTN = '<button class="btn" data-act="bulk-add">Add words</button>';
 
 /* ---------- helpers ---------- */
 const $ = (s, el = document) => el.querySelector(s);
@@ -192,7 +198,9 @@ function normalizeCard(c) {
     ivl: Number(c.ivl) || 0,
     reps: Number(c.reps) || 0,
     lapses: Number(c.lapses) || 0,
-    last: Number(c.last) || null
+    last: Number(c.last) || null,
+    practice: c.practice !== false,
+    folders: Array.isArray(c.folders) ? [...new Set(c.folders.map(String))].slice(0, 50) : []
   };
   n.mod = Number(c.mod) || Math.max(n.updated, n.last || 0, n.created);
   if (n.state !== NEW && !(n.stability > 0)) n.state = NEW;
@@ -207,12 +215,48 @@ function addLog(day, entry) {
 function introducedToday(day) { return new Set((state.logs.get(day) || []).filter(e => e.s === NEW).map(e => e.c)).size; }
 function newLimit(day) { const x = state.settings.extra || {}; return (state.settings.newPerDay | 0) + (x.day === day ? (x.n | 0) : 0); }
 const cardTexts = c => [c.hanzi, ...(c.sentences || []).map(s => s.zh)].filter(Boolean);
-const allTexts = () => { const out = []; for (const c of state.cards.values()) out.push(...cardTexts(c)); return out; };
+const allTexts = () => { const out = []; for (const c of state.cards.values()) if (c.practice) out.push(...cardTexts(c)); return out; };
+const sortedFolders = () => [...state.folders.values()].sort((a, b) => a.created - b.created);
+const folderName = id => (state.folders.get(id) || {}).name || '';
+const folderCount = id => { let n = 0; for (const c of state.cards.values()) if (c.folders.includes(id)) n++; return n; };
+function scopeValid() { const s = prefs.scope || 'all'; return s === 'all' || state.folders.has(s) ? s : 'all'; }
+function inScope(c, scoped) {
+  if (!c.practice) return false;
+  if (!scoped) return true;
+  const s = scopeValid();
+  return s === 'all' || c.folders.includes(s);
+}
+function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function fselHTML(selected) {
+  const fl = sortedFolders();
+  if (!fl.length) return '<span class="hint" style="margin:0">Make folders in the Words tab to group words for a test or a topic.</span>';
+  return fl.map(f => `<button type="button" class="fchip" data-act="fchip-toggle" data-fid="${esc(f.id)}" aria-pressed="${selected.has(f.id)}">${esc(f.name)}</button>`).join('');
+}
+function createFolder(name) {
+  const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), now = Date.now();
+  state.folders.set(id, { id, name, created: now, mod: now });
+  saveLocal(); Sync.soon(3000);
+  return id;
+}
+function renameFolder(id, name) {
+  const f = state.folders.get(id);
+  if (!f) return;
+  state.folders.set(id, { ...f, name, mod: Date.now() });
+  saveLocal(); Sync.soon(3000);
+}
+function deleteFolder(id) {
+  state.folders.delete(id);
+  state.ftomb.set(id, Date.now());
+  if (prefs.scope === id) { prefs.scope = 'all'; savePrefs(); }
+  if (cram && cram.fid === id) cram = null;
+  saveLocal(); Sync.soon(3000);
+}
 
-function queues(now) {
+function queues(now, scoped = true) {
   const nds = nextDayStart(now), day = dayKey(now);
   const learnNow = [], learnSoon = [], rev = [], fresh = [];
   for (const c of state.cards.values()) {
+    if (!inScope(c, scoped)) continue;
     if (c.state === NEW) fresh.push(c);
     else if (c.state === LEARNING || c.state === RELEARNING) (c.due <= now ? learnNow : learnSoon).push(c);
     else if (c.due < nds) rev.push(c);
@@ -581,11 +625,12 @@ function pruneOld() {
   for (const [k, v] of state.logs) if (k < cutoff) { state.days.set(k, Math.max(state.days.get(k) || 0, v.length)); state.logs.delete(k); }
   for (const [k, t] of state.undone) if (t < now - 40 * DAY) state.undone.delete(k);
   for (const [k, t] of state.tomb) if (t < now - 120 * DAY) state.tomb.delete(k);
+  for (const [k, t] of state.ftomb) if (t < now - 120 * DAY) state.ftomb.delete(k);
 }
 function snapshot() {
   pruneOld();
   const obj = m => Object.fromEntries(m);
-  return { app: 'jiyi', v: 2, saved: Date.now(), cards: obj(state.cards), tomb: obj(state.tomb), settings: state.settings, logs: obj(state.logs), days: obj(state.days), undone: obj(state.undone) };
+  return { app: 'jiyi', v: 2, saved: Date.now(), cards: obj(state.cards), tomb: obj(state.tomb), settings: state.settings, logs: obj(state.logs), days: obj(state.days), undone: obj(state.undone), folders: obj(state.folders), ftomb: obj(state.ftomb) };
 }
 function applySnapshot(d) {
   if (!d || typeof d !== 'object') return;
@@ -596,6 +641,8 @@ function applySnapshot(d) {
   Object.entries(d.logs || {}).forEach(([k, v]) => { if (Array.isArray(v)) state.logs.set(k, v); });
   Object.entries(d.days || {}).forEach(([k, v]) => state.days.set(k, +v || 0));
   Object.entries(d.undone || {}).forEach(([k, v]) => state.undone.set(k, +v || 0));
+  Object.values(d.folders || {}).forEach(f => { if (f && f.id && f.name) state.folders.set(String(f.id), { id: String(f.id), name: String(f.name), created: +f.created || 0, mod: +f.mod || 0 }); });
+  Object.entries(d.ftomb || {}).forEach(([k, v]) => state.ftomb.set(k, +v || 0));
 }
 function loadLocal() {
   try { const raw = localStorage.getItem(LS_DECK); if (raw) applySnapshot(JSON.parse(raw)); } catch (e) {}
@@ -666,6 +713,20 @@ function mergeRemote(R) {
   const rd = R.days || {};
   for (const [d, n] of Object.entries(rd)) if ((+n || 0) > (state.days.get(d) || 0)) { state.days.set(d, +n); local = true; }
   for (const [d, n] of state.days) if ((+rd[d] || 0) < n) push = true;
+
+  const rft = R.ftomb || {};
+  for (const [id, t] of Object.entries(rft)) if ((+t || 0) > (state.ftomb.get(id) || 0)) state.ftomb.set(id, +t);
+  for (const [id, t] of state.ftomb) if (!((+rft[id] || 0) >= t)) push = true;
+  const rf = R.folders || {};
+  for (const id of new Set([...state.folders.keys(), ...Object.keys(rf)])) {
+    const l = state.folders.get(id) || null;
+    const r = rf[id] && rf[id].name ? { id, name: String(rf[id].name), created: +rf[id].created || 0, mod: +rf[id].mod || 0 } : null;
+    let win = l;
+    if (r && (!l || r.mod > l.mod)) win = r;
+    if (win && (state.ftomb.get(id) || 0) >= win.mod) win = null;
+    if (win !== l) { if (win) state.folders.set(id, win); else state.folders.delete(id); local = true; }
+    if ((win && (!r || r.mod !== win.mod)) || (!win && r)) push = true;
+  }
 
   const rs = R.settings;
   if (rs && (rs.mod || 0) > (state.settings.mod || 0)) { state.settings = { ...DEFAULTS, ...rs }; local = true; }
@@ -829,13 +890,38 @@ function countsHTML(q) {
     ${lastUndo ? '<button class="link undo" data-act="undo">Undo</button>' : ''}
   </div>`;
 }
+function scopeHTML() {
+  if (cram) {
+    return `<div class="scope-row"><span class="scope-label">Whole folder: ${cram.order.length} of ${cram.total} left</span>
+      <button class="link" data-act="cram-stop">Stop</button>${lastUndo ? '<button class="link undo" data-act="undo">Undo</button>' : ''}</div>`;
+  }
+  const fl = sortedFolders();
+  if (!fl.length) return '';
+  const s = scopeValid();
+  return `<div class="scope-row"><select class="scope-sel" id="scope" aria-label="What to study">
+      <option value="all"${s === 'all' ? ' selected' : ''}>All practice words</option>
+      ${fl.map(f => `<option value="${esc(f.id)}"${f.id === s ? ' selected' : ''}>${esc(f.name)}</option>`).join('')}
+    </select>${s !== 'all' ? '<button class="link" data-act="cram-start">Practice all</button>' : ''}</div>`;
+}
+function startCram(fid) {
+  if (!state.folders.has(fid)) return;
+  const ids = shuffle([...state.cards.values()].filter(c => c.practice && c.folders.includes(fid)).map(c => c.id));
+  if (!ids.length) { toast('This folder has no practice words yet.'); return; }
+  cram = { fid, order: ids, total: ids.length };
+  prefs.scope = fid; savePrefs();
+  study = { id: null, revealed: false, animate: false };
+  if (currentView === 'study') renderStudy(); else showView('study');
+}
 function renderStudy() {
   const el = $('#view-study');
   const now = Date.now();
   const q = queues(now);
   clearTimeout(refreshTimer);
   if (study.id && !state.cards.has(study.id)) study = { id: null, revealed: false, animate: false };
-  if (!study.id) study = { id: pickNext(q), revealed: false, animate: false };
+  if (cram) {
+    cram.order = cram.order.filter(id => { const c = state.cards.get(id); return c && c.practice; });
+    if (!study.id) study = { id: cram.order[0] || null, revealed: false, animate: false };
+  } else if (!study.id) study = { id: pickNext(q), revealed: false, animate: false };
 
   if (!state.cards.size) {
     el.innerHTML = `<div class="empty">
@@ -848,9 +934,30 @@ function renderStudy() {
     setActions('');
     return;
   }
+  const head = scopeHTML() + (cram ? '' : countsHTML(q));
   if (!study.id) {
-    el.innerHTML = countsHTML(q) + doneHTML(q, now);
     setActions('');
+    if (cram) {
+      el.innerHTML = head + `<div class="empty">
+        <div class="tzg" style="--n:1" lang="zh-CN"><span class="cell faint">${GRID_SVG}<span>完</span></span></div>
+        <h1 class="h1">Folder done</h1>
+        <p>You went through all ${cram.total} ${plural(cram.total, 'word')} in “${esc(folderName(cram.fid))}”.</p>
+        <button class="btn secondary" data-act="cram-stop">Back to regular reviews</button>
+      </div>`;
+      return;
+    }
+    let inScopeN = 0;
+    for (const c of state.cards.values()) if (inScope(c, true)) inScopeN++;
+    if (!inScopeN) {
+      const s = scopeValid();
+      el.innerHTML = head + `<div class="empty">
+        <h1 class="h1">Nothing to practice here</h1>
+        <p>${s === 'all' ? 'None of your words have Practice turned on. Turn it on for a word to review it.' : `“${esc(folderName(s))}” has no practice words yet.`}</p>
+        <button class="btn secondary" data-act="tab" data-view="cards">Go to Words</button>
+      </div>`;
+      return;
+    }
+    el.innerHTML = head + doneHTML(q, now, inScopeN);
     const soon = q.learnSoon[0];
     const wait = soon ? clamp(soon.due - now + 300, 1000, 30000) : 30 * MIN;
     refreshTimer = setTimeout(() => { if (currentView === 'study' && !study.id) renderStudy(); }, wait);
@@ -859,10 +966,10 @@ function renderStudy() {
   const c = state.cards.get(study.id);
   const badge = c.state === NEW ? '<span class="badge">New</span>' : c.state === RELEARNING ? '<span class="badge relearn">Relearning</span>' : '';
   if (!study.revealed) {
-    el.innerHTML = countsHTML(q) + `<div class="study-card" data-act="show" role="button" tabindex="0" aria-label="Show answer">${badge}${hanziBlock(c, false)}<p class="tap-hint">Tap to show the answer</p></div>`;
+    el.innerHTML = head + `<div class="study-card" data-act="show" role="button" tabindex="0" aria-label="Show answer">${badge}${hanziBlock(c, false)}<p class="tap-hint">Tap to show the answer</p></div>`;
     setActions('<button class="btn" data-act="show">Show answer</button>');
   } else {
-    el.innerHTML = countsHTML(q) + `<div class="study-card is-back">${badge}${hanziBlock(c, true)}${answerHTML(c, study.animate)}</div>
+    el.innerHTML = head + `<div class="study-card is-back">${badge}${hanziBlock(c, true)}${answerHTML(c, study.animate)}</div>
       <div class="card-tools"><button class="link" data-act="edit-current">Edit card</button></div>`;
     const pv = previewAll(c, now);
     const names = ['Again', 'Hard', 'Good', 'Easy'];
@@ -870,7 +977,7 @@ function renderStudy() {
   }
   study.animate = false;
 }
-function doneHTML(q, now) {
+function doneHTML(q, now, inScopeN) {
   let next = '';
   const soon = q.learnSoon[0];
   if (soon) next = `Next card in ${Math.max(1, Math.round((soon.due - now) / MIN))} min.`;
@@ -893,6 +1000,7 @@ function doneHTML(q, now) {
     ${soon ? '<button class="btn secondary" data-act="study-ahead">Review it now</button>' : ''}
     ${limitHit ? `<p>${waiting} new ${plural(waiting, 'card is', 'cards are')} waiting. Your limit is ${state.settings.newPerDay} a day.</p>
       <button class="btn secondary" data-act="more-new">Learn 5 more today</button>` : ''}
+    ${scopeValid() !== 'all' ? `<button class="btn secondary" data-act="cram-start">Practice all ${inScopeN} ${plural(inScopeN, 'word')} in this folder</button>` : ''}
     <button class="link" data-act="tab" data-view="add">Add a card</button>
   </div>`;
 }
@@ -911,7 +1019,8 @@ function rate(g) {
   const next = { ...r.card, last: now, reps: (c.reps || 0) + 1 };
   if (next.state === REVIEW && r.ivl != null) { const f = fuzz(r.ivl); next.ivl = f; next.due = dayOffset(now, f); }
   const day = dayKey(now);
-  lastUndo = { prev: JSON.parse(JSON.stringify(c)), day, key: c.id + ':' + now };
+  lastUndo = { prev: JSON.parse(JSON.stringify(c)), day, key: c.id + ':' + now, g, cram: !!cram };
+  if (cram && cram.order[0] === c.id) { cram.order.shift(); if (g === 1) cram.order.push(c.id); }
   state.cards.set(c.id, next);
   addLog(day, { c: c.id, g, s: c.state, t: now });
   persistCard(c.id);
@@ -922,8 +1031,13 @@ function rate(g) {
 }
 function undo() {
   if (!lastUndo) return;
-  const { prev, day, key } = lastUndo;
+  const { prev, day, key, g } = lastUndo;
+  const wasCram = lastUndo.cram;
   lastUndo = null;
+  if (wasCram && cram) {
+    if (g === 1) { const i = cram.order.lastIndexOf(prev.id); if (i >= 0) cram.order.splice(i, 1); }
+    cram.order.unshift(prev.id);
+  }
   state.cards.set(prev.id, normalizeCard(prev));
   state.undone.set(key, Date.now());
   state.logs.set(day, (state.logs.get(day) || []).filter(e => (e.c + ':' + e.t) !== key));
@@ -979,6 +1093,8 @@ function cardForm(card) {
       <label class="lbl" for="${f}-e">English</label>
       <input id="${f}-e" class="in" data-k="english" autocomplete="off" placeholder="hello">
     </div>
+    <label class="switch field"><span>Practice this word<span class="hint">Off: it counts as a word you know but never comes up in reviews.</span></span><input type="checkbox" data-k="practice" checked></label>
+    <div class="field"><span class="lbl">Folders</span><div class="fsel"></div></div>
     <div class="field">
       <span class="lbl">Example sentences</span>
       <div class="ex-list"></div>
@@ -989,11 +1105,15 @@ function cardForm(card) {
       <textarea id="${f}-n" class="in" data-k="notes" rows="2" placeholder="Mnemonic, measure word, usage…"></textarea>
     </div>`;
   const get = k => el.querySelector(`[data-k="${k}"]`);
+  const pressed = () => $$('.fsel .fchip[aria-pressed="true"]', el).map(b => b.dataset.fid);
+  const renderFsel = sel => { el.querySelector('.fsel').innerHTML = fselHTML(new Set(sel || [])); };
   const fill = c => {
     get('hanzi').value = c ? c.hanzi : '';
     get('pinyin').value = c ? c.pinyin : '';
     get('english').value = c ? c.english : '';
     get('notes').value = c ? c.notes : '';
+    get('practice').checked = c ? c.practice !== false : true;
+    renderFsel(c ? c.folders : []);
     const list = el.querySelector('.ex-list');
     list.innerHTML = '';
     (c && c.sentences || []).forEach(s => addExBlock(list, s, false));
@@ -1008,6 +1128,8 @@ function cardForm(card) {
         pinyin: convertPinyin(get('pinyin').value).trim().normalize('NFC'),
         english: get('english').value.trim(),
         notes: get('notes').value.trim(),
+        practice: get('practice').checked,
+        folders: pressed(),
         sentences: $$('.ex', el).map(b => ({
           zh: b.querySelector('[data-k="zh"]').value.trim(),
           py: convertPinyin(b.querySelector('[data-k="py"]').value).trim().normalize('NFC'),
@@ -1016,6 +1138,8 @@ function cardForm(card) {
       };
     },
     reset() { fill(null); },
+    refreshFolders() { renderFsel(pressed()); },
+    setFolders(ids) { renderFsel(ids); },
     focus() { try { get('hanzi').focus(); } catch (e) {} },
     error(msg) { const m = el.querySelector('[data-msg]'); m.className = 'field-msg'; m.textContent = msg; m.hidden = false; }
   };
@@ -1059,11 +1183,40 @@ function checkDup(input) {
 /* ---------- add view ---------- */
 function renderAdd() {
   const el = $('#view-add');
-  if (el.dataset.ready) return;
+  if (el.dataset.ready) { addForm.refreshFolders(); renderBulkFolders(); return; }
   el.dataset.ready = '1';
   addForm = cardForm(null);
-  el.innerHTML = '<h1 class="h1">Add a card</h1>';
-  el.appendChild(addForm.el);
+  el.innerHTML = `<h1 class="h1">Add words</h1>
+    <div class="seg" role="group" aria-label="How many words">
+      <button type="button" data-act="add-mode" data-mode="one" aria-pressed="true">One word</button>
+      <button type="button" data-act="add-mode" data-mode="many" aria-pressed="false">Many words</button>
+    </div>
+    <div id="add-one"></div>
+    <div id="add-many" hidden>
+      <div class="field">
+        <label class="lbl" for="bulk-text">Words</label>
+        <textarea class="in in-han-sm" id="bulk-text" rows="7" lang="zh-CN" placeholder="我 你 他 好 是 不 很"></textarea>
+        <span class="hint">Separate words with spaces or new lines. To add pinyin and English as well, put one word per line like this: 你好 | ni3 hao3 | hello</span>
+      </div>
+      <label class="switch field"><span>Practice these words<span class="hint">Off: they’re added as words you know, without reviews.</span></span><input type="checkbox" id="bulk-practice"></label>
+      <div class="field"><span class="lbl">Folders</span><div class="fsel" id="bulk-folders"></div>
+        <span class="hint">Words you already have keep their settings. If you pick a folder, they’re added to it too.</span></div>
+    </div>`;
+  $('#add-one').appendChild(addForm.el);
+  renderBulkFolders();
+  setAddMode(addMode);
+}
+function renderBulkFolders() {
+  const box = $('#bulk-folders');
+  if (!box) return;
+  box.innerHTML = fselHTML(new Set($$('#bulk-folders .fchip[aria-pressed="true"]').map(b => b.dataset.fid)));
+}
+function setAddMode(m) {
+  addMode = m;
+  $$('#view-add .seg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === m)));
+  $('#add-one').hidden = m !== 'one';
+  $('#add-many').hidden = m !== 'many';
+  if (currentView === 'add') setActions(m === 'many' ? BULK_BTN : SAVE_BTN);
 }
 function saveNew() {
   const v = addForm.read();
@@ -1072,11 +1225,54 @@ function saveNew() {
   const c = normalizeCard({ id: newId(), ...v, created: now, updated: now, ...blankSchedule() });
   state.cards.set(c.id, c);
   persistCard(c.id, false, 3000);
-  Prefetch.add(cardTexts(c));
+  if (c.practice) Prefetch.add(cardTexts(c));
   addForm.reset();
+  addForm.setFolders(v.folders);          // keep the folder choice for the next word
   addForm.focus();
-  toast(`Card added: ${c.hanzi}`);
+  toast(c.practice ? `Card added: ${c.hanzi}` : `Added ${c.hanzi} as a known word`);
   $('#main').scrollTop = 0;
+}
+function parseBulk(text) {
+  const out = [], seen = new Set();
+  const push = (hanzi, pinyin, english) => {
+    hanzi = hanzi.trim();
+    if (!hanzi || !HAN.test(hanzi) || seen.has(hanzi)) return;
+    seen.add(hanzi);
+    out.push({ hanzi, pinyin: convertPinyin(pinyin || '').trim().normalize('NFC'), english: (english || '').trim() });
+  };
+  for (const line of text.split(/\r?\n/)) {
+    const l = line.trim();
+    if (!l) continue;
+    if (/[|\t]/.test(l)) { const [h, p, ...e] = l.split(/\s*[|\t]\s*/); push(h || '', p, e.join(', ')); }
+    else l.split(/[\s,，、;；。.]+/).forEach(h => push(h, '', ''));
+  }
+  return out;
+}
+function bulkAdd() {
+  const items = parseBulk($('#bulk-text').value);
+  if (!items.length) { toast('Type or paste some Chinese words first.'); return; }
+  const practice = $('#bulk-practice').checked;
+  const fids = $$('#bulk-folders .fchip[aria-pressed="true"]').map(b => b.dataset.fid);
+  const byHanzi = new Map([...state.cards.values()].map(c => [c.hanzi, c]));
+  const now = Date.now();
+  let added = 0, had = 0;
+  for (const it of items) {
+    const ex = byHanzi.get(it.hanzi);
+    if (ex) {
+      had++;
+      const missing = fids.filter(f => !ex.folders.includes(f));
+      if (missing.length) { ex.folders = [...ex.folders, ...missing]; persistCard(ex.id, false, 3000); }
+      continue;
+    }
+    const c = normalizeCard({ id: newId(), ...it, practice, folders: fids, created: now + added, updated: now, ...blankSchedule() });
+    state.cards.set(c.id, c);
+    byHanzi.set(c.hanzi, c);
+    persistCard(c.id, false, 3000);
+    if (practice) Prefetch.add(cardTexts(c));
+    added++;
+  }
+  $('#bulk-text').value = '';
+  toast(`Added ${added} new ${plural(added, 'word')}.` + (had ? ` ${had} you already had ${had === 1 ? 'was' : 'were'} ${fids.length ? 'put in the folder' : 'skipped'}.` : ''));
 }
 
 /* ---------- editor sheet ---------- */
@@ -1152,18 +1348,66 @@ function armed(btn, text, fn) {
   setTimeout(() => { if (btn.isConnected) { btn.dataset.armed = ''; btn.textContent = orig; } }, 3500);
 }
 
-/* ---------- cards view ---------- */
+/* ---------- words view ---------- */
 function renderCards() {
   const el = $('#view-cards');
   if (!el.dataset.ready) {
     el.dataset.ready = '1';
-    el.innerHTML = `<h1 class="h1">Cards <span class="muted" id="cards-count"></span></h1>
-      <input class="in search" id="search" type="search" placeholder="Search hanzi, pinyin or English" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Search cards">
+    el.innerHTML = `<h1 class="h1">Words <span class="muted" id="cards-count"></span></h1>
+      <div class="chips" id="fchips" aria-label="Folders"></div>
+      <div id="folder-tools"></div>
+      <input class="in search" id="search" type="search" placeholder="Search hanzi, pinyin or English" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Search words">
       <div class="list" id="card-list"></div>`;
   }
+  if (!['all', 'practice'].includes(words.filter) && !state.folders.has(words.filter)) { words.filter = 'practice'; words.mode = 'list'; }
+  renderChips();
+  renderFolderTools();
   renderCardList();
 }
+function renderChips() {
+  const el = $('#fchips');
+  if (!el) return;
+  const x = el.scrollLeft;
+  let prac = 0;
+  for (const c of state.cards.values()) if (c.practice) prac++;
+  const all = state.cards.size;
+  const chip = (id, label, n) => `<button class="fchip" data-act="wfilter" data-f="${esc(id)}" aria-pressed="${words.filter === id}">${esc(label)}<b>${n}</b></button>`;
+  el.innerHTML = chip('practice', 'Practicing', prac) + chip('all', 'All words', all) +
+    sortedFolders().map(f => chip(f.id, f.name, folderCount(f.id))).join('') +
+    `<button class="fchip add" data-act="new-folder">${ICON.plus}New folder</button>`;
+  el.scrollLeft = x;
+}
+function renderFolderTools() {
+  const el = $('#folder-tools');
+  if (!el) return;
+  const f = state.folders.get(words.filter);
+  if (words.tools === 'new' || (words.tools === 'rename' && f)) {
+    const isNew = words.tools === 'new';
+    el.innerHTML = `<div class="inline-form"><input class="in" id="folder-name" maxlength="40" autocomplete="off" placeholder="Folder name, e.g. Midterm" aria-label="Folder name">
+      <button class="btn secondary" data-act="${isNew ? 'folder-create' : 'folder-rename-save'}">${isNew ? 'Create' : 'Save'}</button></div>
+      <button class="link" data-act="folder-tools-cancel">Cancel</button>`;
+    const inp = $('#folder-name');
+    if (!isNew) inp.value = f.name;
+    try { inp.focus(); } catch (e) {}
+    return;
+  }
+  if (!f) {
+    el.innerHTML = '';
+    return;
+  }
+  if (words.mode === 'pick') {
+    el.innerHTML = `<div class="pick-bar"><span>Tap words to add them to “${esc(f.name)}” or take them out.</span><button class="btn compact" data-act="pick-done">Done</button></div>`;
+    return;
+  }
+  el.innerHTML = `<div class="folder-tools">
+    <button class="link strong" data-act="folder-study">Study this folder</button>
+    <button class="link" data-act="pick-start">Choose words</button>
+    <button class="link" data-act="folder-rename">Rename</button>
+    <button class="link danger" data-act="folder-delete">Delete folder</button>
+  </div>`;
+}
 function cardStatus(c, now, nds) {
+  if (!c.practice) return ['Known', ''];
   if (c.state === NEW) return ['New', ''];
   if (c.state !== REVIEW) return ['Learning', 'due'];
   if (c.due < nds) return ['Due', 'due'];
@@ -1175,31 +1419,52 @@ function renderCardList() {
   const raw = $('#search').value.trim();
   const q = fold(raw);
   const now = Date.now(), nds = nextDayStart(now);
+  const fid = words.filter, picking = words.mode === 'pick' && state.folders.has(fid);
   let arr = [...state.cards.values()];
+  if (!picking) {
+    if (fid === 'practice') arr = arr.filter(c => c.practice);
+    else if (state.folders.has(fid)) arr = arr.filter(c => c.folders.includes(fid));
+  }
   if (raw) arr = arr.filter(c => c.hanzi.includes(raw) || (q && (fold(c.pinyin).includes(q) || fold(c.english).includes(q))));
   arr.sort((a, b) => b.created - a.created);
   $('#cards-count').textContent = state.cards.size ? String(state.cards.size) : '';
-  if (!state.cards.size) { list.innerHTML = '<p class="list-note">No cards yet. Add one from the Add tab.</p>'; return; }
-  if (!arr.length) { list.innerHTML = `<p class="list-note">Nothing matches “${esc(raw)}”.</p>`; return; }
+  if (!state.cards.size) { list.innerHTML = '<p class="list-note">No words yet. Add some from the Add tab.</p>'; return; }
+  if (!arr.length) {
+    list.innerHTML = `<p class="list-note">${raw ? `Nothing matches “${esc(raw)}”.` : state.folders.has(fid) ? 'No words in this folder yet. Tap Choose words to add some.' : 'Nothing here yet.'}</p>`;
+    return;
+  }
   const shown = arr.slice(0, 400);
   list.innerHTML = shown.map(c => {
+    const top = `<span class="rh" lang="zh-CN">${esc(c.hanzi)}</span>
+      <span class="rm"><span class="rp">${c.pinyin ? pinyinHTML(c.pinyin) : '&nbsp;'}</span><span class="re">${esc(c.english) || '&nbsp;'}</span></span>`;
+    if (picking) {
+      const on = c.folders.includes(fid);
+      return `<button class="row${on ? ' on' : ''}" data-act="pick-toggle" data-id="${esc(c.id)}" aria-pressed="${on}">${top}<span class="check">${ICON.check}</span></button>`;
+    }
     const [st, cls] = cardStatus(c, now, nds);
-    return `<button class="row" data-act="open-card" data-id="${esc(c.id)}">
-      <span class="rh" lang="zh-CN">${esc(c.hanzi)}</span>
-      <span class="rm"><span class="rp">${c.pinyin ? pinyinHTML(c.pinyin) : '&nbsp;'}</span><span class="re">${esc(c.english) || '&nbsp;'}</span></span>
-      <span class="rs ${cls}">${esc(st)}</span>
-    </button>`;
+    return `<button class="row" data-act="open-card" data-id="${esc(c.id)}">${top}<span class="rs ${cls}">${esc(st)}</span></button>`;
   }).join('') + (arr.length > shown.length ? `<p class="list-note">Showing ${shown.length} of ${arr.length}. Search to narrow it down.</p>` : '');
+}
+function togglePick(btn) {
+  const c = state.cards.get(btn.dataset.id), fid = words.filter;
+  if (!c || !state.folders.has(fid)) return;
+  const on = !c.folders.includes(fid);
+  c.folders = on ? [...c.folders, fid] : c.folders.filter(x => x !== fid);
+  persistCard(c.id, false, 5000);
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+  renderChips();
 }
 
 /* ---------- stats ---------- */
 function renderStats() {
   const el = $('#view-stats');
   const now = Date.now(), today = dayKey(now), ds0 = dayStart(now);
-  const q = queues(now);
-  let nNew = 0, nLearn = 0, nYoung = 0, nMature = 0, rSum = 0, rN = 0;
+  const q = queues(now, false);
+  let nNew = 0, nLearn = 0, nYoung = 0, nMature = 0, nKnown = 0, rSum = 0, rN = 0;
   const fc = new Array(14).fill(0);
   for (const c of state.cards.values()) {
+    if (!c.practice) { nKnown++; continue; }
     if (c.state === NEW) { nNew++; continue; }
     if (c.state === REVIEW) { if ((c.ivl || 0) >= 21) nMature++; else nYoung++; } else nLearn++;
     if (c.last && c.stability > 0) { rSum += retr(Math.max(0, (now - c.last) / DAY), c.stability); rN++; }
@@ -1217,17 +1482,53 @@ function renderStats() {
   for (let i = studied(today) ? 0 : 1; i < 3650; i++) {
     if (studied(dayKey(ds0 + 12 * HOUR - i * DAY))) streak++; else break;
   }
-  const total = state.cards.size || 1;
+  const total = (state.cards.size - nKnown) || 1;
   const maxFc = Math.max(1, ...fc);
   const wd = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
   const recall = rN ? Math.round(rSum / rN * 100) : null;
+  // vocabulary
+  const allN = state.cards.size, practN = allN - nKnown;
+  const wk0 = dayOffset(now, -((new Date(ds0).getDay() + 6) % 7));          // this week's Monday
+  const d0 = new Date(ds0), mo0 = new Date(d0.getFullYear(), d0.getMonth(), 1, DAY_START_HOUR).getTime();
+  let addedWeek = 0, addedMonth = 0;
+  const weeks = [];
+  for (let i = 11; i >= 0; i--) { const start = dayOffset(wk0, -7 * i); weeks.push({ start, end: dayOffset(start, 7), n: 0 }); }
+  for (const c of state.cards.values()) {
+    if (c.created >= wk0) addedWeek++;
+    if (c.created >= mo0) addedMonth++;
+    for (const w of weeks) if (c.created < w.end) w.n++;
+  }
+  const maxW = Math.max(1, ...weeks.map(w => w.n));
+  const short = n => n >= 10000 ? Math.round(n / 1000) + 'k' : n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n);
+  const md = ms => { const d = new Date(ms); return d.getDate() + '/' + (d.getMonth() + 1); };
+  const folderRows = sortedFolders().map(f => {
+    let n = 0, learned = 0;
+    for (const c of state.cards.values()) if (c.folders.includes(f.id)) { n++; if (!c.practice || c.state === REVIEW) learned++; }
+    return { f, n, learned };
+  });
   el.innerHTML = `<h1 class="h1">Stats</h1>
     <div class="kv">
       <div><b>${dueToday}</b><span>Due today</span></div>
       <div><b>${reviewedToday}</b><span>Answered today</span></div>
       <div><b>${streak}</b><span>Day streak</span></div>
-      <div><b>${state.cards.size}</b><span>Cards</span></div>
+      <div><b>${state.cards.size}</b><span>Words</span></div>
     </div>
+    <section class="stat-sec">
+      <h2 class="h2">Your vocabulary</h2>
+      <p class="vocab-num">${allN}<span>${plural(allN, 'word')}</span></p>
+      <p class="muted" style="font-size:14px">${practN} in your reviews and ${nKnown} without practice. Added ${addedWeek} this week and ${addedMonth} this month.</p>
+      <div class="fc fc12" role="img" aria-label="Total words at the end of each of the last 12 weeks: ${weeks.map(w => w.n).join(', ')}">
+        ${weeks.map((w, i) => `<div class="col"><span class="n">${i % 3 === 2 || i === 11 ? short(w.n) : ''}</span><i class="bar${w.n ? '' : ' zero'}${i === 11 ? '' : ' past'}" style="height:${w.n ? Math.max(4, w.n / maxW * 100) : 2}%"></i></div>`).join('')}
+      </div>
+      <div class="fc-days fc12" aria-hidden="true">${weeks.map((w, i) => `<span>${i % 3 === 0 ? md(w.start) : ''}</span>`).join('')}</div>
+      <p class="muted" style="font-size:13px;margin-top:6px">Total words, week by week.</p>
+      ${folderRows.length ? `<div class="folder-stats">${folderRows.map(r => `
+        <div class="fs-row">
+          <div class="fs-top"><span>${esc(r.f.name)}</span><span class="muted">${r.learned} of ${r.n} learned</span></div>
+          <div class="meter"><i style="width:${r.n ? r.learned / r.n * 100 : 0}%"></i></div>
+        </div>`).join('')}
+        <p class="muted" style="font-size:13px">Learned means past the learning steps, or a word you don’t practice.</p></div>` : ''}
+    </section>
     <section class="stat-sec">
       <h2 class="h2">Estimated recall right now</h2>
       ${recall != null ? `<p class="big">${recall}%</p><div class="meter"><i style="width:${recall}%"></i></div>
@@ -1247,7 +1548,7 @@ function renderStats() {
       <div class="fc-days" aria-hidden="true">${fc.map((_, i) => `<span>${i === 0 ? 'Now' : wd[new Date(ds0 + 12 * HOUR + i * DAY).getDay()]}</span>`).join('')}</div>
     </section>
     <section class="stat-sec">
-      <h2 class="h2">Your deck</h2>
+      <h2 class="h2">Practice cards</h2>
       <div class="stack" aria-hidden="true">
         <i class="k-mature" style="width:${nMature / total * 100}%"></i><i class="k-young" style="width:${nYoung / total * 100}%"></i><i class="k-learn" style="width:${nLearn / total * 100}%"></i><i class="k-new" style="width:${nNew / total * 100}%"></i>
       </div>
@@ -1465,6 +1766,12 @@ async function handleImport(input) {
   if (obj && obj.days && typeof obj.days === 'object') {
     for (const [d, v] of Object.entries(obj.days)) state.days.set(d, Math.max(state.days.get(d) || 0, +v || 0));
   }
+  if (obj && obj.folders && typeof obj.folders === 'object') {
+    Object.values(obj.folders).forEach(f => {
+      const id = f && f.id && String(f.id);
+      if (id && f.name && !state.folders.has(id) && !state.ftomb.has(id)) state.folders.set(id, { id, name: String(f.name), created: +f.created || Date.now(), mod: Date.now() });
+    });
+  }
   saveLocalNow();
   Sync.soon(2000);
   Prefetch.add(allTexts());
@@ -1480,7 +1787,7 @@ function showView(name) {
   VIEWS.forEach(v => { $('#view-' + v).hidden = v !== name; });
   $$('.tab').forEach(t => { if (t.dataset.view === name) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current'); });
   if (name === 'options') $('#opt-btn').setAttribute('aria-current', 'page'); else $('#opt-btn').removeAttribute('aria-current');
-  if (name !== 'study') setActions(name === 'add' ? '<button class="btn" data-act="save-new">Save card</button>' : '');
+  if (name !== 'study') setActions(name === 'add' ? (addMode === 'many' ? BULK_BTN : SAVE_BTN) : '');
   if (name === 'study') renderStudy();
   else if (name === 'add') renderAdd();
   else if (name === 'cards') renderCards();
@@ -1490,7 +1797,7 @@ function showView(name) {
 }
 function dataChanged() {
   if (currentView === 'study') renderStudy();
-  else if (currentView === 'cards') renderCardList();
+  else if (currentView === 'cards') { renderChips(); renderCardList(); }
   else if (currentView === 'stats') renderStats();
   else if (currentView === 'options') { renderSyncUI(); renderAzureStatus(); }
 }
@@ -1517,6 +1824,29 @@ document.addEventListener('click', e => {
     case 'delete-card': if (editing) { const id = editing.id; armed(t, 'Tap again to delete', () => deleteCard(id)); } break;
     case 'reset-card': if (editing) { const id = editing.id; armed(t, 'Tap again to reset', () => resetCard(id)); } break;
     case 'example-card': addExampleCard(); break;
+    case 'wfilter': words.filter = t.dataset.f; words.mode = 'list'; words.tools = ''; renderCards(); break;
+    case 'new-folder': words.tools = 'new'; words.mode = 'list'; renderFolderTools(); break;
+    case 'folder-create': {
+      const name = ($('#folder-name').value || '').trim();
+      if (!name) { $('#folder-name').focus(); break; }
+      words.filter = createFolder(name); words.tools = ''; words.mode = 'pick';
+      renderCards();
+      toast(`Folder “${name}” created. Tap words to add them.`);
+      break;
+    }
+    case 'folder-rename': words.tools = 'rename'; renderFolderTools(); break;
+    case 'folder-rename-save': { const name = ($('#folder-name').value || '').trim(); if (name) renameFolder(words.filter, name); words.tools = ''; renderCards(); break; }
+    case 'folder-tools-cancel': words.tools = ''; renderFolderTools(); break;
+    case 'folder-delete': { const id = words.filter; armed(t, 'Tap again to delete', () => { deleteFolder(id); words.filter = 'practice'; words.mode = 'list'; renderCards(); toast('Folder deleted. Its words are still in All words.'); }); break; }
+    case 'folder-study': prefs.scope = words.filter; savePrefs(); cram = null; study = { id: null, revealed: false, animate: false }; showView('study'); break;
+    case 'pick-start': words.mode = 'pick'; renderFolderTools(); renderCardList(); break;
+    case 'pick-done': words.mode = 'list'; renderCards(); break;
+    case 'pick-toggle': togglePick(t); break;
+    case 'fchip-toggle': t.setAttribute('aria-pressed', String(t.getAttribute('aria-pressed') !== 'true')); break;
+    case 'add-mode': setAddMode(t.dataset.mode); break;
+    case 'bulk-add': bulkAdd(); break;
+    case 'cram-start': startCram(scopeValid()); break;
+    case 'cram-stop': cram = null; study = { id: null, revealed: false, animate: false }; renderStudy(); break;
     case 'more-new': moreNew(); break;
     case 'study-ahead': { const q = queues(Date.now()); if (q.learnSoon[0]) { study = { id: q.learnSoon[0].id, revealed: false, animate: false }; renderStudy(); } break; }
     case 'export': exportData(); break;
@@ -1560,6 +1890,7 @@ document.addEventListener('input', e => {
 document.addEventListener('change', e => {
   const t = e.target;
   if (t.id === 'import-file') { handleImport(t); return; }
+  if (t.id === 'scope') { prefs.scope = t.value; savePrefs(); cram = null; study = { id: null, revealed: false, animate: false }; renderStudy(); return; }
   if (t.dataset && t.dataset.pref === 'voice') {
     prefs.voice = t.value;
     const v = t.value.startsWith('device:') ? TTS.voices.find(x => x.voiceURI === t.value.slice(7)) : null;
@@ -1581,6 +1912,7 @@ document.addEventListener('change', e => {
   persistSettings();
 });
 document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target && e.target.id === 'folder-name') { e.preventDefault(); const b = $('#folder-tools .btn'); if (b) b.click(); return; }
   if (currentView !== 'study' || editing) return;
   if (e.target.closest && e.target.closest('input,textarea,select')) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
