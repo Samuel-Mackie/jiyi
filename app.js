@@ -15,6 +15,11 @@ const W = [0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046, 1.
 const DECAY = -0.5, FACTOR = 19 / 81;
 const DEFAULTS = { rate: 0.9, autoplay: true, newPerDay: 15, retention: 0.9, toneColors: true, extra: { day: '', n: 0 }, mod: 0 };
 const PREF_DEFAULTS = { voice: '', voiceName: '', azKey: '', azRegion: '', ghToken: '', gistId: '', scope: 'all' };
+const AUTOPLAY_HINTS = {
+  front: '<b>Better for listening and speaking.</b> You hear every word with its characters before you answer, so you can repeat it aloud. It no longer tests whether you remember the pronunciation yourself.',
+  back: '<b>Tests your pronunciation.</b> Say the word aloud first, then flip to check yourself.',
+  off: 'Play words yourself with the Listen buttons.'
+};
 const LS_DECK = 'jiyi-deck-v2', LS_PREFS = 'jiyi-prefs-v1';
 const GIST_FILE = 'jiyi-deck.json';
 const LOG_DAYS = 35;
@@ -206,6 +211,12 @@ function normalizeCard(c) {
   if (n.state !== NEW && !(n.stability > 0)) n.state = NEW;
   if (n.state !== NEW && !(n.difficulty >= 1)) n.difficulty = initD(3);
   return n;
+}
+// Older settings only have the autoplay switch: on meant 'play on flip'.
+function autoplayMode() {
+  const s = state.settings;
+  if (['front', 'back', 'off'].includes(s.autoplayWhen)) return s.autoplayWhen;
+  return s.autoplay === false ? 'off' : 'back';
 }
 function blankSchedule() { return { state: NEW, due: Date.now(), stability: 0, difficulty: 0, step: 0, ivl: 0, reps: 0, lapses: 0, last: null }; }
 function addLog(day, entry) {
@@ -920,8 +931,8 @@ function renderStudy() {
   if (study.id && !state.cards.has(study.id)) study = { id: null, revealed: false, animate: false };
   if (cram) {
     cram.order = cram.order.filter(id => { const c = state.cards.get(id); return c && c.practice; });
-    if (!study.id) study = { id: cram.order[0] || null, revealed: false, animate: false };
-  } else if (!study.id) study = { id: pickNext(q), revealed: false, animate: false };
+    if (!study.id) study = { id: cram.order[0] || null, revealed: false, animate: false, fresh: true };
+  } else if (!study.id) study = { id: pickNext(q), revealed: false, animate: false, fresh: true };
 
   if (!state.cards.size) {
     el.innerHTML = `<div class="empty">
@@ -966,8 +977,19 @@ function renderStudy() {
   const c = state.cards.get(study.id);
   const badge = c.state === NEW ? '<span class="badge">New</span>' : c.state === RELEARNING ? '<span class="badge relearn">Relearning</span>' : '';
   if (!study.revealed) {
-    el.innerHTML = head + `<div class="study-card" data-act="show" role="button" tabindex="0" aria-label="Show answer">${badge}${hanziBlock(c, false)}<p class="tap-hint">Tap to show the answer</p></div>`;
+    const mode = autoplayMode(), say = esc(c.hanzi);
+    const frontAudio = mode === 'front' ? `<div class="audio-row">
+        <button class="pill" id="front-listen" data-act="say" data-say="${say}">${ICON.play}Listen</button>
+        <button class="pill" data-act="say" data-slow="1" data-say="${say}">${ICON.play}Slow</button>
+      </div>` : '';
+    el.innerHTML = head + `<div class="study-card" data-act="show" role="button" tabindex="0" aria-label="Show answer">${badge}${hanziBlock(c, false)}${frontAudio}<p class="tap-hint">Tap to show the answer</p></div>`;
     setActions('<button class="btn" data-act="show">Show answer</button>');
+    // Speak once when a card first appears. Before the first tap the phone blocks sound,
+    // so then the word plays when the answer is shown instead.
+    if (study.fresh) {
+      study.fresh = false;
+      if (mode === 'front' && unlocked) { study.heard = true; speak(c.hanzi, false, $('#front-listen')); }
+    }
   } else {
     el.innerHTML = head + `<div class="study-card is-back">${badge}${hanziBlock(c, true)}${answerHTML(c, study.animate)}</div>
       <div class="card-tools"><button class="link" data-act="edit-current">Edit card</button></div>`;
@@ -1009,7 +1031,8 @@ function reveal() {
   study.revealed = true; study.animate = true;
   renderStudy();
   const c = state.cards.get(study.id);
-  if (c && state.settings.autoplay) speak(c.hanzi, false, $('.audio-row .pill'));
+  const mode = autoplayMode();
+  if (c && (mode === 'back' || (mode === 'front' && !study.heard))) speak(c.hanzi, false, $('.audio-row .pill'));
 }
 function rate(g) {
   const c = state.cards.get(study.id);
@@ -1043,7 +1066,7 @@ function undo() {
   state.logs.set(day, (state.logs.get(day) || []).filter(e => (e.c + ':' + e.t) !== key));
   state.days.set(day, Math.max(0, (state.days.get(day) || 0) - 1));
   persistCard(prev.id);
-  study = { id: prev.id, revealed: false, animate: false };
+  study = { id: prev.id, revealed: false, animate: false, fresh: true };
   renderStudy();
   toast('Last answer undone');
 }
@@ -1608,7 +1631,14 @@ function renderOptions() {
         <span class="hint">The Slow buttons play at 65% of this speed.</span>
       </div>
       <button class="pill" data-act="say" data-say="你好，很高兴认识你。">${ICON.play}Test voice</button>
-      <label class="switch" style="margin-top:10px"><span>Play the word when the answer appears</span><input type="checkbox" data-set="autoplay"${s.autoplay ? ' checked' : ''}></label>
+      <div class="field" style="margin-top:16px">
+        <label class="lbl" for="opt-autoplay">Play the word automatically</label>
+        <select class="in" id="opt-autoplay" data-set="autoplayWhen">
+          ${[['front', 'When the card appears'], ['back', 'When you flip the card'], ['off', 'Off']]
+            .map(([v, l]) => `<option value="${v}"${autoplayMode() === v ? ' selected' : ''}>${l}</option>`).join('')}
+        </select>
+        <span class="hint" id="autoplay-hint">${AUTOPLAY_HINTS[autoplayMode()]}</span>
+      </div>
     </section>
     <section class="opt-sec">
       <h2 class="h2">Azure neural voices</h2>
@@ -1810,7 +1840,7 @@ document.addEventListener('click', e => {
     case 'show': reveal(); break;
     case 'rate': rate(+t.dataset.g); break;
     case 'undo': undo(); break;
-    case 'say': speak(t.dataset.say, t.dataset.slow === '1', t); break;
+    case 'say': if (t.id === 'front-listen') study.heard = true; speak(t.dataset.say, t.dataset.slow === '1', t); break;
     case 'say-input': speak(t.closest('.with-btn').querySelector('input').value, false, t); break;
     case 'say-ex': speak(t.closest('.ex').querySelector('[data-k="zh"]').value, t.dataset.slow === '1', t); break;
     case 'add-ex': addExBlock(t.closest('.form').querySelector('.ex-list'), null, true); break;
@@ -1848,7 +1878,7 @@ document.addEventListener('click', e => {
     case 'cram-start': startCram(scopeValid()); break;
     case 'cram-stop': cram = null; study = { id: null, revealed: false, animate: false }; renderStudy(); break;
     case 'more-new': moreNew(); break;
-    case 'study-ahead': { const q = queues(Date.now()); if (q.learnSoon[0]) { study = { id: q.learnSoon[0].id, revealed: false, animate: false }; renderStudy(); } break; }
+    case 'study-ahead': { const q = queues(Date.now()); if (q.learnSoon[0]) { study = { id: q.learnSoon[0].id, revealed: false, animate: false, fresh: true }; renderStudy(); } break; }
     case 'export': exportData(); break;
     case 'import': $('#import-file').click(); break;
     case 'az-save': azureSave(); break;
@@ -1904,7 +1934,12 @@ document.addEventListener('change', e => {
   const k = t.dataset && t.dataset.set;
   if (!k) return;
   const s = { ...state.settings };
-  if (k === 'autoplay' || k === 'toneColors') s[k] = t.checked;
+  if (k === 'autoplayWhen') {
+    s.autoplayWhen = ['front', 'back', 'off'].includes(t.value) ? t.value : 'back';
+    s.autoplay = s.autoplayWhen !== 'off';          // keeps older versions of the app consistent
+    const h = $('#autoplay-hint'); if (h) h.innerHTML = AUTOPLAY_HINTS[s.autoplayWhen];
+  }
+  else if (k === 'autoplay' || k === 'toneColors') s[k] = t.checked;
   else if (k === 'rate') s.rate = clamp(parseFloat(t.value) || 0.9, 0.5, 1.3);
   else if (k === 'retention') s.retention = clamp(parseFloat(t.value) || 0.9, 0.8, 0.97);
   else if (k === 'newPerDay') { s.newPerDay = clamp(parseInt(t.value, 10) || 0, 0, 999); t.value = s.newPerDay; }
