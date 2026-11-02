@@ -348,6 +348,9 @@ input[type=range]{width:100%;accent-color:var(--cobalt);margin:6px 0}
 .pa-tip{font-size:13.5px;margin-top:6px}
 .pa-wait{font-size:14px;color:var(--muted)}
 .pa-wait.err{color:var(--again)}
+.pa-lvl{height:4px;max-width:160px;margin:10px auto 2px;border-radius:2px;background:var(--line-soft);overflow:hidden}
+.pa-lvl i{display:block;height:100%;background:var(--cobalt);border-radius:2px;transform:scaleX(0);transform-origin:left center;transition:transform .08s linear}
+@media (prefers-reduced-motion: reduce){.pa-lvl i{transition:none}}
 </style>
 </head>
 <body>
