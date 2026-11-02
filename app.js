@@ -13,7 +13,7 @@ const MAX_IVL = 36500, DAY_START_HOUR = 4;
 // FSRS-5 default parameters
 const W = [0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046, 1.54575, 0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315, 2.9898, 0.51655, 0.6621];
 const DECAY = -0.5, FACTOR = 19 / 81;
-const DEFAULTS = { rate: 0.9, autoplay: true, newPerDay: 15, retention: 0.9, toneColors: true, extra: { day: '', n: 0 }, mod: 0 };
+const DEFAULTS = { rate: 0.9, autoplay: true, newPerDay: 15, retention: 0.9, toneColors: true, autoPinyin: true, extra: { day: '', n: 0 }, mod: 0 };
 const PREF_DEFAULTS = { voice: '', voiceName: '', azKey: '', azRegion: '', ghToken: '', gistId: '', scope: 'all' };
 const AUTOPLAY_HINTS = {
   front: '<b>Better for listening and speaking.</b> You hear every word with its characters before you answer, so you can repeat it aloud. It no longer tests whether you remember the pronunciation yourself.',
@@ -40,7 +40,8 @@ const HAN = /\p{Script=Han}/u;
 const ICON = {
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 5v14l11.5-7z" fill="currentColor"/></svg>',
   plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
-  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>'
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>'
 };
 const GRID_SVG = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" fill="none" stroke="currentColor"><path d="M0 50H100M50 0V100" stroke-width="1" stroke-dasharray="4 3.5"/><path d="M0 0L100 100M100 0L0 100" stroke-width=".8" stroke-dasharray="2 4" opacity=".6"/></svg>';
 
@@ -53,7 +54,7 @@ let currentView = 'study';
 let addForm = null, editing = null;
 let refreshTimer = null;
 let cram = null;                                   // 'practice the whole folder' session
-let words = { filter: 'practice', mode: 'list', tools: '' };
+let words = { filter: 'practice', mode: 'list', tools: '', pickIn: 'all' };
 let addMode = 'one';
 const SAVE_BTN = '<button class="btn" data-act="save-new">Save card</button>';
 const BULK_BTN = '<button class="btn" data-act="bulk-add">Add words</button>';
@@ -92,6 +93,45 @@ let toastTimer = null;
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('on');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('on'), 2800);
+}
+
+/* ---------- extra scripts, loaded when first needed (the service worker keeps them for offline use) ---------- */
+const scriptLoads = {};
+function loadScript(src, ready) {
+  if (ready()) return Promise.resolve();
+  if (!scriptLoads[src]) {
+    scriptLoads[src] = new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = src; el.async = true;
+      el.onload = () => ready() ? resolve() : reject(new Error(src + ' did not load'));
+      el.onerror = () => { delete scriptLoads[src]; el.remove(); reject(new Error(src + ' did not load')); };
+      document.head.appendChild(el);
+    });
+  }
+  return scriptLoads[src];
+}
+function loadPinyin() {
+  return loadScript('pinyin-pro.js', () => !!window.pinyinPro)
+    .then(() => loadScript('pinyin-auto.js', () => !!window.JiyiPinyin))
+    .then(() => { if (!window.JiyiPinyin.ready()) throw new Error('pinyin did not load'); return window.JiyiPinyin; });
+}
+let deckIdx = null;
+function loadDecks() {
+  return loadScript('decks.js', () => !!window.JIYI_DECKS).then(() => {
+    if (!deckIdx) {
+      deckIdx = new Map();
+      for (const d of window.JIYI_DECKS.decks) for (const w of d.words) if (!deckIdx.has(w[0])) deckIdx.set(w[0], w);
+    }
+    return window.JIYI_DECKS;
+  });
+}
+const deckWord = hanzi => (deckIdx && deckIdx.get(hanzi)) || null;
+// Deck words use their checked pinyin; anything else is converted character by character.
+function autoWordPinyin(JP, hanzi) { const w = deckWord(hanzi); return w ? w[1] : JP.word(hanzi); }
+function stableId(text) {
+  let h1 = 0x811c9dc5, h2 = 5381;
+  for (let i = 0; i < text.length; i++) { const c = text.charCodeAt(i); h1 = Math.imul(h1 ^ c, 16777619); h2 = (Math.imul(h2, 33) + c) | 0; }
+  return 'k' + (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36);
 }
 
 /* ---------- FSRS-5 ---------- */
@@ -870,6 +910,7 @@ function highlight(zh, word) {
 }
 function answerHTML(c, animate) {
   const say = esc(c.hanzi);
+  const speakOn = azureReady();
   const ex = (c.sentences || []).map(s => `
     <div class="ex-view">
       <div>
@@ -880,16 +921,20 @@ function answerHTML(c, animate) {
       <div class="ex-btns">
         <button class="chip" data-act="say" data-say="${esc(s.zh)}" aria-label="Play sentence">${ICON.play}</button>
         <button class="chip" data-act="say" data-slow="1" data-say="${esc(s.zh)}" aria-label="Play sentence slowly">Slow</button>
+        ${speakOn ? `<button class="chip" data-act="assess" data-ref="${esc(s.zh)}" aria-label="Say the sentence and get feedback">${ICON.mic}</button>` : ''}
       </div>
+      ${speakOn ? '<div class="pa" data-pa hidden></div>' : ''}
     </div>`).join('');
   return `<div class="answer${animate ? ' rise' : ''}">
     ${c.pinyin ? `<p class="py">${pinyinHTML(c.pinyin)}</p>` : ''}
     <div class="audio-row">
       <button class="pill" data-act="say" data-say="${say}">${ICON.play}Listen</button>
       <button class="pill" data-act="say" data-slow="1" data-say="${say}">${ICON.play}Slow</button>
+      ${speakOn ? `<button class="pill" data-act="assess" data-ref="${say}">${ICON.mic}Say it</button>` : ''}
     </div>
     ${c.english ? `<p class="en">${esc(c.english)}</p>` : ''}
     ${c.notes ? `<p class="notes">${esc(c.notes)}</p>` : ''}
+    ${speakOn ? '<div class="pa" data-pa hidden></div>' : ''}
     ${ex ? `<div class="ex-wrap"><h3 class="sub">Examples</h3>${ex}</div>` : ''}
   </div>`;
 }
@@ -938,8 +983,9 @@ function renderStudy() {
     el.innerHTML = `<div class="empty">
       <div class="tzg" style="--n:2" lang="zh-CN"><span class="cell faint">${GRID_SVG}<span>字</span></span><span class="cell faint">${GRID_SVG}<span>卡</span></span></div>
       <h1 class="h1">Start your deck</h1>
-      <p>Add a word with its pinyin, meaning and example sentences, or import a backup in Options. Cards show up here when it’s time to review.</p>
-      <button class="btn" data-act="tab" data-view="add">Add your first card</button>
+      <p>Pick a ready-made deck like HSK 1 or Survival phrases, or add your own words. Cards show up here when it’s time to review.</p>
+      <button class="btn" data-act="go-decks">Choose a starter deck</button>
+      <button class="btn secondary" data-act="tab" data-view="add">Add your own words</button>
       <button class="link" data-act="example-card">Or try it with an example card</button>
     </div>`;
     setActions('');
@@ -1108,9 +1154,9 @@ function cardForm(card) {
       <p class="field-msg" data-msg hidden></p>
     </div>
     <div class="field">
-      <label class="lbl" for="${f}-p">Pinyin</label>
+      <div class="lbl-row"><label class="lbl" for="${f}-p">Pinyin</label><button type="button" class="link mini" data-act="fill-py">Fill in from hanzi</button></div>
       <input id="${f}-p" class="in" data-k="pinyin" data-pinyin autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="ni3 hao3">
-      <span class="hint">Type tone numbers and they turn into marks: ni3 hao3 becomes nǐ hǎo. Use v for ü.</span>
+      <span class="hint">Type tone numbers and they turn into marks: ni3 hao3 becomes nǐ hǎo. Use v for ü. Pinyin filled in from the hanzi is a best guess: check characters with more than one reading.</span>
     </div>
     <div class="field">
       <label class="lbl" for="${f}-e">English</label>
@@ -1131,6 +1177,7 @@ function cardForm(card) {
   const pressed = () => $$('.fsel .fchip[aria-pressed="true"]', el).map(b => b.dataset.fid);
   const renderFsel = sel => { el.querySelector('.fsel').innerHTML = fselHTML(new Set(sel || [])); };
   const fill = c => {
+    ['pinyin', 'english'].forEach(k => { get(k).dataset.auto = ''; });
     get('hanzi').value = c ? c.hanzi : '';
     get('pinyin').value = c ? c.pinyin : '';
     get('english').value = c ? c.english : '';
@@ -1189,6 +1236,39 @@ function addExBlock(list, s, focus) {
   list.appendChild(b);
   if (focus) { try { b.querySelector('textarea').focus(); } catch (e) {} }
 }
+/* ---------- automatic pinyin in forms ---------- */
+const autoTimers = new WeakMap();
+function scheduleAuto(el, fn) { clearTimeout(autoTimers.get(el)); autoTimers.set(el, setTimeout(fn, 220)); }
+// Only replace a field that's empty or was filled in automatically, never something you typed.
+function setAuto(input, value) {
+  if (input.value.trim() && input.value !== input.dataset.auto) return;
+  input.value = value; input.dataset.auto = value;
+}
+function clearAuto(input) { if (input.value && input.value === input.dataset.auto) { input.value = ''; input.dataset.auto = ''; } }
+async function autoFillWord(form, force) {
+  if (!form || (!state.settings.autoPinyin && !force)) return;
+  const hIn = form.querySelector('[data-k="hanzi"]'), py = form.querySelector('[data-k="pinyin"]'), en = form.querySelector('[data-k="english"]');
+  const h = hIn.value.trim();
+  if (!h || !HAN.test(h)) { clearAuto(py); clearAuto(en); if (force && !h) hIn.focus(); return; }
+  let JP;
+  try { [JP] = await Promise.all([loadPinyin(), loadDecks().catch(() => null)]); }
+  catch (e) { if (force) toast('Couldn’t load automatic pinyin. Check your connection.'); return; }
+  if (hIn.value.trim() !== h) return;                      // you kept typing
+  if (force) py.dataset.auto = py.value;
+  setAuto(py, autoWordPinyin(JP, h));
+  const w = deckWord(h);
+  if (w && w[2]) setAuto(en, w[2]); else clearAuto(en);
+}
+async function autoFillSentence(block) {
+  if (!block || !state.settings.autoPinyin) return;
+  const zhIn = block.querySelector('[data-k="zh"]'), py = block.querySelector('[data-k="py"]');
+  const zh = zhIn.value.trim();
+  if (!zh || !HAN.test(zh)) { clearAuto(py); return; }
+  let JP;
+  try { JP = await loadPinyin(); } catch (e) { return; }
+  if (zhIn.value.trim() !== zh) return;
+  setAuto(py, JP.sentence(zh));
+}
 function checkDup(input) {
   const form = input.closest('.form');
   if (!form) return;
@@ -1206,13 +1286,14 @@ function checkDup(input) {
 /* ---------- add view ---------- */
 function renderAdd() {
   const el = $('#view-add');
-  if (el.dataset.ready) { addForm.refreshFolders(); renderBulkFolders(); return; }
+  if (el.dataset.ready) { addForm.refreshFolders(); renderBulkFolders(); if (addMode === 'decks') renderDecks(); return; }
   el.dataset.ready = '1';
   addForm = cardForm(null);
   el.innerHTML = `<h1 class="h1">Add words</h1>
-    <div class="seg" role="group" aria-label="How many words">
+    <div class="seg seg3" role="group" aria-label="How to add words">
       <button type="button" data-act="add-mode" data-mode="one" aria-pressed="true">One word</button>
       <button type="button" data-act="add-mode" data-mode="many" aria-pressed="false">Many words</button>
+      <button type="button" data-act="add-mode" data-mode="decks" aria-pressed="false">Decks</button>
     </div>
     <div id="add-one"></div>
     <div id="add-many" hidden>
@@ -1224,7 +1305,8 @@ function renderAdd() {
       <label class="switch field"><span>Practice these words<span class="hint">Off: they’re added as words you know, without reviews.</span></span><input type="checkbox" id="bulk-practice"></label>
       <div class="field"><span class="lbl">Folders</span><div class="fsel" id="bulk-folders"></div>
         <span class="hint">Words you already have keep their settings. If you pick a folder, they’re added to it too.</span></div>
-    </div>`;
+    </div>
+    <div id="add-decks" hidden></div>`;
   $('#add-one').appendChild(addForm.el);
   renderBulkFolders();
   setAddMode(addMode);
@@ -1239,8 +1321,11 @@ function setAddMode(m) {
   $$('#view-add .seg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === m)));
   $('#add-one').hidden = m !== 'one';
   $('#add-many').hidden = m !== 'many';
-  if (currentView === 'add') setActions(m === 'many' ? BULK_BTN : SAVE_BTN);
+  $('#add-decks').hidden = m !== 'decks';
+  if (m === 'decks') renderDecks();
+  if (currentView === 'add') setActions(addActions());
 }
+const addActions = () => addMode === 'many' ? BULK_BTN : addMode === 'decks' ? '' : SAVE_BTN;
 function saveNew() {
   const v = addForm.read();
   if (!v.hanzi) { addForm.error('Add the hanzi for this card.'); addForm.focus(); return; }
@@ -1271,9 +1356,23 @@ function parseBulk(text) {
   }
   return out;
 }
-function bulkAdd() {
+async function bulkAdd() {
   const items = parseBulk($('#bulk-text').value);
   if (!items.length) { toast('Type or paste some Chinese words first.'); return; }
+  if (state.settings.autoPinyin) {
+    try {
+      const [JP] = await Promise.all([loadPinyin(), loadDecks().catch(() => null)]);
+      for (const it of items) {
+        const w = deckWord(it.hanzi);
+        if (!it.pinyin) it.pinyin = autoWordPinyin(JP, it.hanzi);
+        if (w) {                                         // words from the built-in decks come with the rest of the card
+          if (!it.english) it.english = w[2];
+          it.notes = w[3] || '';
+          it.sentences = (w[4] || []).map(x => ({ zh: x[0], py: x[1], en: x[2] }));
+        }
+      }
+    } catch (e) { toast('Couldn’t load automatic pinyin. The words are added without it.'); }
+  }
   const practice = $('#bulk-practice').checked;
   const fids = $$('#bulk-folders .fchip[aria-pressed="true"]').map(b => b.dataset.fid);
   const byHanzi = new Map([...state.cards.values()].map(c => [c.hanzi, c]));
@@ -1296,6 +1395,96 @@ function bulkAdd() {
   }
   $('#bulk-text').value = '';
   toast(`Added ${added} new ${plural(added, 'word')}.` + (had ? ` ${had} you already had ${had === 1 ? 'was' : 'were'} ${fids.length ? 'put in the folder' : 'skipped'}.` : ''));
+}
+
+/* ---------- standard decks ---------- */
+let deckPractice = true;
+const deckFolderId = id => 'deck-' + id;
+function renderDecks() {
+  const box = $('#add-decks');
+  if (!box) return;
+  if (!window.JIYI_DECKS) {
+    box.innerHTML = '<p class="list-note">Loading decks…</p>';
+    loadDecks().then(() => { if (addMode === 'decks') renderDecks(); }).catch(() => {
+      if (addMode === 'decks') box.innerHTML = '<p class="list-note">Couldn’t load the decks. Check your connection and try again.</p><button class="btn secondary" data-act="decks-retry">Try again</button>';
+    });
+    return;
+  }
+  const have = new Map();
+  for (const c of state.cards.values()) have.set(c.hanzi, c);
+  const groups = [];
+  for (const d of window.JIYI_DECKS.decks) {
+    let g = groups.find(x => x.name === d.group);
+    if (!g) groups.push(g = { name: d.group, decks: [] });
+    g.decks.push(d);
+  }
+  box.innerHTML = `<p class="deck-intro">Ready-made words with pinyin, meaning, an example sentence and notes on common traps. Each deck goes into its own folder, and words you already have keep their progress.</p>
+    <label class="switch field"><span>Practice the words I add<span class="hint">New words come in at your limit of ${state.settings.newPerDay} a day. Off: they’re added without reviews, and you choose which to practice under Words → Practicing → Choose words.</span></span><input type="checkbox" id="deck-practice"${deckPractice ? ' checked' : ''}></label>` +
+    groups.map(g => `<h2 class="h2 deck-group">${g.name === 'HSK' ? 'HSK, 2025 syllabus' : esc(g.name)}</h2>` + g.decks.map(d => {
+      const n = d.words.length, fid = deckFolderId(d.id);
+      let got = 0, inF = 0;
+      for (const w of d.words) { const c = have.get(w[0]); if (c) { got++; if (c.folders.includes(fid)) inF++; } }
+      const missing = n - got;
+      let btn;
+      if (missing) btn = `<button class="btn compact" data-act="deck-add" data-deck="${esc(d.id)}">${got ? `Add ${missing} more` : 'Add'}</button>`;
+      else if (inF < n || !state.folders.has(fid)) btn = `<button class="btn compact secondary" data-act="deck-add" data-deck="${esc(d.id)}">Add to folder</button>`;
+      else btn = `<button class="btn compact secondary" data-act="deck-open" data-deck="${esc(d.id)}">Open</button>`;
+      return `<div class="deck">
+        <div class="deck-main">
+          <p class="deck-name">${esc(d.name)} <span class="deck-zh" lang="zh-CN">${esc(d.zh)}</span></p>
+          <p class="deck-desc">${esc(d.desc)}</p>
+          <p class="deck-meta">${n} ${plural(n, 'word')}${got ? ` · you have ${got === n ? 'all' : got}` : ''}</p>
+          ${got ? `<div class="meter"><i style="width:${got / n * 100}%"></i></div>` : ''}
+        </div>
+        ${btn}
+      </div>`;
+    }).join('')).join('');
+}
+function addDeck(id) {
+  const d = window.JIYI_DECKS && window.JIYI_DECKS.decks.find(x => x.id === id);
+  if (!d) return;
+  const practice = $('#deck-practice') ? $('#deck-practice').checked : deckPractice;
+  const fid = deckFolderId(d.id), now = Date.now();
+  if (!state.folders.has(fid)) { state.folders.set(fid, { id: fid, name: d.name, created: now, mod: now }); state.ftomb.delete(fid); }
+  const byHanzi = new Map();
+  for (const c of state.cards.values()) byHanzi.set(c.hanzi, c);
+  let added = 0, had = 0;
+  const texts = [];
+  d.words.forEach((w, i) => {
+    const [hanzi, pinyin, english, notes, ex] = w;
+    const old = byHanzi.get(hanzi);
+    if (old) {
+      had++;
+      if (!old.folders.includes(fid)) { old.folders = [...old.folders, fid]; old.mod = now; }
+      return;
+    }
+    // The same id on every device, so adding a deck on two phones before they sync gives one card per word.
+    let cid = stableId(hanzi);
+    if (state.cards.has(cid)) cid = newId();
+    state.tomb.delete(cid);
+    const c = normalizeCard({
+      id: cid, hanzi, pinyin, english, notes, practice, folders: [fid],
+      sentences: (ex || []).map(x => ({ zh: x[0], py: x[1], en: x[2] })),
+      created: now + i, updated: now, mod: now, ...blankSchedule()
+    });
+    state.cards.set(cid, c);
+    byHanzi.set(hanzi, c);
+    if (practice) texts.push(...cardTexts(c));
+    added++;
+  });
+  saveLocal(); Sync.soon(2000);
+  if (texts.length) Prefetch.add(texts);
+  let msg = added ? `Added ${added} ${plural(added, 'word')} to “${d.name}”.` : `All ${had} words are in “${d.name}”.`;
+  if (added && had) msg += ` ${had} you already had are in the folder too.`;
+  if (added && practice) msg += ` New words come in at ${state.settings.newPerDay} a day.`;
+  toast(msg);
+  renderDecks();
+}
+function openDeck(id) {
+  const fid = deckFolderId(id);
+  if (!state.folders.has(fid)) return;
+  words.filter = fid; words.mode = 'list'; words.tools = '';
+  showView('cards');
 }
 
 /* ---------- editor sheet ---------- */
@@ -1327,7 +1516,9 @@ function openEditor(id) {
 function closeEditor() {
   $('#sheet').hidden = true;
   $('#sheet').innerHTML = '';
+  $('#sheet').setAttribute('aria-label', 'Edit card');
   editing = null;
+  pendingImport = null;
   document.body.classList.remove('sheet-open');
 }
 function saveEditor() {
@@ -1414,6 +1605,20 @@ function renderFolderTools() {
     try { inp.focus(); } catch (e) {}
     return;
   }
+  if (words.filter === 'practice') {
+    if (words.mode === 'pick') {
+      const fl = sortedFolders();
+      if (words.pickIn !== 'all' && !state.folders.has(words.pickIn)) words.pickIn = 'all';
+      el.innerHTML = `<div class="pick-bar"><span>Tap words to practice them, or tap again to stop.</span><button class="btn compact" data-act="pick-done">Done</button></div>
+        <div class="pick-tools">${fl.length ? `<select class="scope-sel" id="pick-in" aria-label="Show words from">
+            <option value="all">All words</option>${fl.map(x => `<option value="${esc(x.id)}"${words.pickIn === x.id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}
+          </select>` : ''}
+          <button class="link" data-act="pick-all">Practice all shown</button><button class="link" data-act="pick-none">Stop all shown</button></div>`;
+      return;
+    }
+    el.innerHTML = '<div class="folder-tools"><button class="link" data-act="pick-start">Choose words</button></div>';
+    return;
+  }
   if (!f) {
     el.innerHTML = '';
     return;
@@ -1436,33 +1641,43 @@ function cardStatus(c, now, nds) {
   if (c.due < nds) return ['Due', 'due'];
   return ['in ' + fmtDays(daysBetween(now, c.due)), ''];
 }
-function renderCardList() {
-  const list = $('#card-list');
-  if (!list) return;
-  const raw = $('#search').value.trim();
+// The words the list shows right now (folder, picker filter and search applied).
+function listedCards() {
+  const raw = ($('#search') ? $('#search').value : '').trim();
   const q = fold(raw);
-  const now = Date.now(), nds = nextDayStart(now);
-  const fid = words.filter, picking = words.mode === 'pick' && state.folders.has(fid);
+  const fid = words.filter, picking = words.mode === 'pick' && state.folders.has(fid), pickPrac = words.mode === 'pick' && fid === 'practice';
   let arr = [...state.cards.values()];
-  if (!picking) {
+  if (pickPrac) { if (words.pickIn !== 'all' && state.folders.has(words.pickIn)) arr = arr.filter(c => c.folders.includes(words.pickIn)); }
+  else if (!picking) {
     if (fid === 'practice') arr = arr.filter(c => c.practice);
     else if (state.folders.has(fid)) arr = arr.filter(c => c.folders.includes(fid));
   }
   if (raw) arr = arr.filter(c => c.hanzi.includes(raw) || (q && (fold(c.pinyin).includes(q) || fold(c.english).includes(q))));
-  arr.sort((a, b) => b.created - a.created);
+  // Deck folders keep the deck's order (most common words first); everything else shows the newest first.
+  const shownFolder = pickPrac ? words.pickIn : fid;
+  if (String(shownFolder).startsWith('deck-')) arr.sort((a, b) => a.created - b.created);
+  else arr.sort((a, b) => b.created - a.created);
+  return { arr, raw, picking, pickPrac };
+}
+function renderCardList() {
+  const list = $('#card-list');
+  if (!list) return;
+  const now = Date.now(), nds = nextDayStart(now);
+  const fid = words.filter;
+  const { arr, raw, picking, pickPrac } = listedCards();
   $('#cards-count').textContent = state.cards.size ? String(state.cards.size) : '';
   if (!state.cards.size) { list.innerHTML = '<p class="list-note">No words yet. Add some from the Add tab.</p>'; return; }
   if (!arr.length) {
-    list.innerHTML = `<p class="list-note">${raw ? `Nothing matches “${esc(raw)}”.` : state.folders.has(fid) ? 'No words in this folder yet. Tap Choose words to add some.' : 'Nothing here yet.'}</p>`;
+    list.innerHTML = `<p class="list-note">${raw ? `Nothing matches “${esc(raw)}”.` : pickPrac ? 'No words in this folder.' : state.folders.has(fid) ? 'No words in this folder yet. Tap Choose words to add some.' : fid === 'practice' ? 'You’re not practicing any words. Tap Choose words to pick some.' : 'Nothing here yet.'}</p>`;
     return;
   }
   const shown = arr.slice(0, 400);
   list.innerHTML = shown.map(c => {
     const top = `<span class="rh" lang="zh-CN">${esc(c.hanzi)}</span>
       <span class="rm"><span class="rp">${c.pinyin ? pinyinHTML(c.pinyin) : '&nbsp;'}</span><span class="re">${esc(c.english) || '&nbsp;'}</span></span>`;
-    if (picking) {
-      const on = c.folders.includes(fid);
-      return `<button class="row${on ? ' on' : ''}" data-act="pick-toggle" data-id="${esc(c.id)}" aria-pressed="${on}">${top}<span class="check">${ICON.check}</span></button>`;
+    if (picking || pickPrac) {
+      const on = pickPrac ? c.practice : c.folders.includes(fid);
+      return `<button class="row${on ? ' on' : ''}" data-act="${pickPrac ? 'pick-practice' : 'pick-toggle'}" data-id="${esc(c.id)}" aria-pressed="${on}">${top}<span class="check">${ICON.check}</span></button>`;
     }
     const [st, cls] = cardStatus(c, now, nds);
     return `<button class="row" data-act="open-card" data-id="${esc(c.id)}">${top}<span class="rs ${cls}">${esc(st)}</span></button>`;
@@ -1477,6 +1692,32 @@ function togglePick(btn) {
   btn.classList.toggle('on', on);
   btn.setAttribute('aria-pressed', String(on));
   renderChips();
+}
+
+function togglePractice(btn) {
+  const c = state.cards.get(btn.dataset.id);
+  if (!c) return;
+  c.practice = !c.practice;
+  persistCard(c.id, false, 5000);
+  if (c.practice) Prefetch.add(cardTexts(c));
+  btn.classList.toggle('on', c.practice);
+  btn.setAttribute('aria-pressed', String(c.practice));
+  renderChips();
+}
+function pickAll(on) {
+  const { arr } = listedCards();
+  const now = Date.now(), texts = [];
+  let n = 0;
+  for (const c of arr) {
+    if (c.practice === on) continue;
+    c.practice = on; c.mod = now; n++;
+    if (on) texts.push(...cardTexts(c));
+  }
+  if (!n) { toast(on ? 'All of these are already in practice.' : 'None of these are in practice.'); return; }
+  saveLocal(); Sync.soon(3000);
+  if (texts.length) Prefetch.add(texts);
+  toast(on ? `Practicing ${n} more ${plural(n, 'word')}. New ones come in at ${state.settings.newPerDay} a day.` : `Stopped practicing ${n} ${plural(n, 'word')}. Their progress is kept.`);
+  renderChips(); renderCardList();
 }
 
 /* ---------- stats ---------- */
@@ -1643,6 +1884,7 @@ function renderOptions() {
     <section class="opt-sec">
       <h2 class="h2">Azure neural voices</h2>
       <p>Natural Mandarin voices from Microsoft. The free tier covers 500,000 characters a month, far more than flashcards use. The key is stored only on this device.</p>
+      <p>With a key, the back of each card also gets a <b>Say it</b> button: say the word or sentence and Azure scores your pronunciation character by character. This uses speech recognition on the same Azure resource, which has its own free monthly allowance.</p>
       <div class="field">
         <label class="lbl" for="az-key">Key</label>
         <input class="in" id="az-key" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste KEY 1 from the Azure portal">
@@ -1677,6 +1919,11 @@ function renderOptions() {
       </div>
     </section>
     <section class="opt-sec">
+      <h2 class="h2">Adding words</h2>
+      <label class="switch"><span>Fill in pinyin automatically<span class="hint">Pinyin appears as you type hanzi, for words and example sentences. Words from the built-in decks also get their meaning. It’s a best guess: check characters with more than one reading, like 行 or 长.</span></span><input type="checkbox" data-set="autoPinyin"${s.autoPinyin ? ' checked' : ''}></label>
+      ${missingPinyin() ? `<button class="btn secondary" data-act="fill-missing" style="margin-top:8px">Add pinyin where it’s missing (${missingPinyin()} ${plural(missingPinyin(), 'card')})</button>` : ''}
+    </section>
+    <section class="opt-sec">
       <h2 class="h2">Display</h2>
       <label class="switch"><span>Color pinyin and hanzi by tone</span><input type="checkbox" data-set="toneColors"${s.toneColors ? ' checked' : ''}></label>
       <p class="tone-sample"><span class="t1">mā</span> <span class="t2">má</span> <span class="t3">mǎ</span> <span class="t4">mà</span> <span class="t5">ma</span></p>
@@ -1700,7 +1947,7 @@ function renderOptions() {
     </section>
     <section class="opt-sec">
       <h2 class="h2">Backup</h2>
-      <p>A file with all your cards and progress. To move cards from the Claude version, export there and import here.</p>
+      <p>A file with all your cards and progress. Use it to keep a copy or to move to another device without sync.</p>
       <div class="btn-row">
         <button class="btn secondary" data-act="export">Export backup</button>
         <button class="btn secondary" data-act="import">Import backup</button>
@@ -1708,9 +1955,23 @@ function renderOptions() {
       <div id="backup-box"></div>
     </section>
     <section class="opt-sec">
+      <h2 class="h2">Import words</h2>
+      <p>Bring in a word list from Anki, Pleco or a spreadsheet. Words you already have keep their progress.</p>
+      <ul class="steps">
+        <li><b>Anki:</b> File → Export, then choose Notes in Plain Text.</li>
+        <li><b>Pleco:</b> Flashcards → Import/Export → Export Cards, as a text file.</li>
+        <li><b>Spreadsheet:</b> save as CSV with columns for hanzi, pinyin and meaning.</li>
+      </ul>
+      <button class="btn secondary" data-act="import-words">Choose a file</button>
+    </section>
+    <section class="opt-sec">
       <h2 class="h2">How scheduling works</h2>
       <p>Cards are scheduled with FSRS-5, the memory model built into Anki. Each card tracks how stable your memory of it is and how hard the word is for you, and comes back when your chance of recalling it drops to your target retention.</p>
       <p>New cards go through two short steps, 1 and 10 minutes, before their first interval of a few days. A card you forget gets a 10-minute relearning step. Grade honestly: Hard means you recalled it with real effort, Again means you didn’t.</p>
+    </section>
+    <section class="opt-sec">
+      <h2 class="h2">About</h2>
+      <p>Jìyì is free and works offline. Scheduling uses FSRS-5. Automatic pinyin uses pinyin-pro (MIT). The HSK lists come from complete-hsk-vocabulary (MIT), with readings checked against CC-CEDICT (CC BY-SA 4.0); glosses, example sentences and notes were written for Jìyì. Neural voices and speaking practice use Microsoft Azure Speech.</p>
     </section>`;
   $('#az-key').value = prefs.azKey;
   $('#az-region').value = prefs.azRegion;
@@ -1809,6 +2070,301 @@ async function handleImport(input) {
   dataChanged();
 }
 
+/* ---------- add pinyin to existing cards ---------- */
+function missingPinyin() {
+  let n = 0;
+  for (const c of state.cards.values()) if ((!c.pinyin && HAN.test(c.hanzi)) || c.sentences.some(x => !x.py && HAN.test(x.zh))) n++;
+  return n;
+}
+async function fillMissing(btn) {
+  let JP;
+  try { [JP] = await Promise.all([loadPinyin(), loadDecks().catch(() => null)]); }
+  catch (e) { toast('Couldn’t load automatic pinyin. Check your connection.'); return; }
+  const now = Date.now();
+  let n = 0;
+  for (const c of state.cards.values()) {
+    let ch = false;
+    if (!c.pinyin && HAN.test(c.hanzi)) { c.pinyin = autoWordPinyin(JP, c.hanzi); ch = true; }
+    c.sentences.forEach(x => { if (!x.py && HAN.test(x.zh)) { x.py = JP.sentence(x.zh); ch = true; } });
+    if (ch) { c.mod = now; c.updated = now; n++; }
+  }
+  saveLocal(); Sync.soon(3000);
+  toast(n ? `Added pinyin to ${n} ${plural(n, 'card')}. Check words with more than one reading.` : 'Every card already has pinyin.');
+  if (currentView === 'options') renderOptions();
+}
+
+/* ---------- import word lists (Anki, Pleco, CSV) ---------- */
+let pendingImport = null;
+const PY_ONLY = /^[a-zA-ZüÜ:āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜĀÁǍÀĒÉĚÈĪÍǏÌŌÓǑÒŪÚǓÙǕǗǙǛ0-5\s'’·,.\-]+$/;
+const PY_TONE = /[āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜĀÁǍÀĒÉĚÈĪÍǏÌŌÓǑÒŪÚǓÙǕǗǙǛ]|[a-zü:][1-5]/i;
+function cleanField(v, html) {
+  v = String(v || '').replace(/\[sound:[^\]]*\]/g, '');
+  if (html || /<[a-z!\/][^>]*>/i.test(v)) {
+    v = v.replace(/<br\s*\/?>|<\/div>|<\/p>|<\/li>/gi, ' ').replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+      .replace(/&#(\d+);/g, (m, n) => { try { return String.fromCodePoint(+n); } catch (e) { return ''; } }).replace(/&amp;/g, '&');
+  }
+  return v.replace(/[\uE000-\uF8FF]/g, ' ').replace(/\s+/g, ' ').trim();     // Pleco formatting marks
+}
+function splitLine(line, sep) {
+  if (sep === '\t') return line.split('\t');
+  const out = [];
+  let cur = '', q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) { if (ch === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+    else if (ch === '"' && !cur.trim()) { q = true; cur = ''; }
+    else if (ch === sep) { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+function normPinyin(p) {
+  p = String(p || '').trim();
+  if (!p) return '';
+  if (/[1-5]/.test(p)) p = p.replace(/([a-zA-ZüÜ:]+?[1-5])(?=[a-zA-ZüÜ])/g, '$1 ');   // Pleco: ni3hao3
+  return convertPinyin(p).replace(/\s+/g, ' ').trim().normalize('NFC');
+}
+function parseWordFile(text) {
+  const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r\n|\n|\r/);
+  let sep = null, html = false, anki = false, pleco = false, category = '';
+  const skip = new Set(), body = [];
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, '');
+    if (!line.trim()) continue;
+    const m = !body.length && line.match(/^#([a-z ]+):(.*)$/i);
+    if (m) {                                           // Anki header lines
+      anki = true;
+      const k = m[1].trim().toLowerCase(), v = m[2].trim();
+      if (k === 'separator') sep = { tab: '\t', comma: ',', semicolon: ';', pipe: '|', space: ' ' }[v.toLowerCase()] || v || null;
+      else if (k === 'html') html = v === 'true';
+      else if (/column$/.test(k)) { const n = parseInt(v, 10); if (n > 0) skip.add(n - 1); }
+      continue;
+    }
+    if (/^\/\//.test(line)) { pleco = true; category = line.replace(/^\/\/\s*/, '').trim(); continue; }   // Pleco category
+    body.push({ line, category });
+  }
+  if (!body.length) return null;
+  if (!sep) {
+    const sample = body.slice(0, 60).map(b => b.line), has = ch => sample.filter(l => l.includes(ch)).length;
+    sep = has('\t') ? '\t' : has(';') > has(',') ? ';' : has(',') ? ',' : has('|') ? '|' : '\t';
+  }
+  const rows = body.map(b => ({ cells: splitLine(b.line, sep).map((c, i) => skip.has(i) ? '' : cleanField(c, html)), category: b.category }));
+  const ncol = Math.max(...rows.map(r => r.cells.length));
+  const stats = [];
+  for (let i = 0; i < ncol; i++) {
+    let n = 0, han = 0, py = 0, lat = 0, len = 0;
+    for (const r of rows.slice(0, 400)) {
+      const v = r.cells[i] || '';
+      if (!v) continue;
+      n++;
+      if (HAN.test(v)) { han++; len += Array.from(v.replace(/\[.*?\]/g, '')).length; }
+      else if (PY_ONLY.test(v) && PY_TONE.test(v)) py++;
+      else if (/[A-Za-z]/.test(v)) lat++;
+    }
+    stats.push({ i, han: n ? han / n : 0, py: n ? py / n : 0, lat: n ? lat / n : 0, len: han ? len / han : 0 });
+  }
+  const hanCols = stats.filter(x => x.han >= 0.6).sort((a, b) => a.len - b.len || a.i - b.i);
+  if (!hanCols.length) return null;
+  const hz = hanCols[0].i;
+  const sent = hanCols.find(x => x.i !== hz && x.len >= hanCols[0].len + 3);
+  const pyCols = stats.filter(x => x.i !== hz && x.py >= 0.5).sort((a, b) => a.i - b.i);
+  const latCols = stats.filter(x => x.i !== hz && x.lat >= 0.5 && !pyCols.includes(x)).sort((a, b) => a.i - b.i);
+  const map = {
+    hanzi: hz,
+    pinyin: (sent ? pyCols.find(x => x.i < sent.i) : null) || pyCols[0] || null,
+    english: (sent ? latCols.find(x => x.i < sent.i) : null) || latCols[0] || null,
+    sentence: sent || null
+  };
+  map.sentPy = sent ? pyCols.find(x => x.i > sent.i && x !== map.pinyin) || null : null;
+  map.sentEn = sent ? latCols.find(x => x.i > sent.i && x !== map.english) || null : null;
+  const get = (r, col) => col ? (r.cells[col.i] || '') : '';
+  const out = [], seen = new Set();
+  for (const r of rows) {
+    let h = (r.cells[hz] || '').replace(/\[.*?\]/g, '').replace(/[（(][^)）]*[)）]/g, '').replace(/\s+/g, '');
+    h = Array.from(h).slice(0, 40).join('');
+    if (!h || !HAN.test(h) || seen.has(h)) continue;
+    seen.add(h);
+    const zh = get(r, map.sentence);
+    out.push({
+      hanzi: h,
+      pinyin: normPinyin(get(r, map.pinyin)),
+      english: get(r, map.english).slice(0, 300),
+      sentences: zh && HAN.test(zh) ? [{ zh, py: normPinyin(get(r, map.sentPy)), en: get(r, map.sentEn) }] : [],
+      category: pleco ? r.category : ''
+    });
+  }
+  const cats = [...new Set(out.map(r => r.category).filter(Boolean))];
+  return { rows: out, map, format: pleco ? 'Pleco' : anki ? 'Anki' : sep === ',' || sep === ';' ? 'CSV' : 'text', cats };
+}
+async function handleWordImport(input) {
+  const file = input.files && input.files[0];
+  input.value = '';
+  if (!file) return;
+  let parsed = null;
+  try { parsed = parseWordFile(await file.text()); } catch (e) { parsed = null; }
+  if (!parsed || !parsed.rows.length) { toast('No Chinese words found in that file.'); return; }
+  pendingImport = { ...parsed, name: file.name.replace(/\.[^.]+$/, '').slice(0, 40) };
+  openImportSheet();
+}
+function openImportSheet() {
+  const p = pendingImport;
+  if (!p) return;
+  const have = new Set();
+  for (const c of state.cards.values()) have.add(c.hanzi);
+  const fresh = p.rows.filter(r => !have.has(r.hanzi)).length, old = p.rows.length - fresh;
+  const noPy = p.rows.filter(r => !r.pinyin).length;
+  const col = c => c == null ? '<i>not found</i>' : 'column ' + (c.i + 1);
+  const sheet = $('#sheet');
+  sheet.setAttribute('aria-label', 'Import words');
+  sheet.innerHTML = `<div class="sheet-head"><button class="link" data-act="sheet-close">Cancel</button><strong>Import words</strong><button class="link strong" data-act="import-apply">Import</button></div>
+    <div class="sheet-body wrap">
+      <p class="sched-info">Found ${p.rows.length} ${plural(p.rows.length, 'word')} in “${esc(p.name)}” (${esc(p.format)}). ${fresh} ${plural(fresh, 'is', 'are')} new${old ? `, and ${old} you already have keep their progress` : ''}.</p>
+      <p class="muted imp-map">Hanzi: ${col({ i: p.map.hanzi })} · Pinyin: ${col(p.map.pinyin)} · Meaning: ${col(p.map.english)}${p.map.sentence ? ' · Example: ' + col(p.map.sentence) : ''}</p>
+      <div class="list imp-preview">${p.rows.slice(0, 5).map(r => `<div class="row"><span class="rh" lang="zh-CN">${esc(r.hanzi)}</span>
+        <span class="rm"><span class="rp">${r.pinyin ? pinyinHTML(r.pinyin) : '&nbsp;'}</span><span class="re">${esc(r.english) || '&nbsp;'}</span></span><span></span></div>`).join('')}</div>
+      ${noPy && state.settings.autoPinyin ? `<p class="hint">${noPy} ${plural(noPy, 'word has', 'words have')} no pinyin. It’s filled in automatically.</p>` : ''}
+      <label class="switch field"><span>Practice the new words<span class="hint">New words come in at your limit of ${state.settings.newPerDay} a day.</span></span><input type="checkbox" id="imp-practice" checked></label>
+      ${p.cats.length ? `<label class="switch field"><span>Keep Pleco categories as folders<span class="hint">${p.cats.length} ${plural(p.cats.length, 'category', 'categories')}: ${esc(p.cats.slice(0, 4).join(', '))}${p.cats.length > 4 ? '…' : ''}</span></span><input type="checkbox" id="imp-cats" checked></label>` : ''}
+      <div class="field">
+        <label class="lbl" for="imp-folder">Put them in a folder <span class="opt">optional</span></label>
+        <input class="in" id="imp-folder" maxlength="40" autocomplete="off" value="${esc(p.name)}">
+        <span class="hint">Leave it empty to add the words without a folder.</span>
+      </div>
+      <button class="btn" data-act="import-apply">Import ${p.rows.length} ${plural(p.rows.length, 'word')}</button>
+    </div>`;
+  sheet.hidden = false;
+  sheet.scrollTop = 0;
+  document.body.classList.add('sheet-open');
+}
+async function applyImport() {
+  const p = pendingImport;
+  if (!p) return;
+  const practice = $('#imp-practice').checked, keepCats = $('#imp-cats') ? $('#imp-cats').checked : false;
+  const fname = ($('#imp-folder').value || '').trim();
+  if (state.settings.autoPinyin && p.rows.some(r => !r.pinyin || r.sentences.some(x => !x.py))) {
+    try {
+      const [JP] = await Promise.all([loadPinyin(), loadDecks().catch(() => null)]);
+      for (const r of p.rows) {
+        if (!r.pinyin) r.pinyin = autoWordPinyin(JP, r.hanzi);
+        r.sentences.forEach(x => { if (!x.py) x.py = JP.sentence(x.zh); });
+      }
+    } catch (e) {}
+  }
+  const byName = new Map(sortedFolders().map(f => [f.name, f.id]));
+  const folderFor = name => byName.get(name) || (byName.set(name, createFolder(name)), byName.get(name));
+  const byHanzi = new Map();
+  for (const c of state.cards.values()) byHanzi.set(c.hanzi, c);
+  const now = Date.now(), texts = [];
+  let added = 0, had = 0;
+  p.rows.forEach((r, i) => {
+    const fids = [];
+    if (fname) fids.push(folderFor(fname.slice(0, 40)));
+    if (keepCats && r.category) fids.push(folderFor(r.category.slice(0, 40)));
+    const old = byHanzi.get(r.hanzi);
+    if (old) {
+      had++;
+      const miss = fids.filter(f => !old.folders.includes(f));
+      if (miss.length) { old.folders = [...old.folders, ...miss]; old.mod = now; }
+      return;
+    }
+    const c = normalizeCard({ id: newId(), hanzi: r.hanzi, pinyin: r.pinyin, english: r.english, sentences: r.sentences, practice, folders: fids, created: now + i, updated: now, mod: now, ...blankSchedule() });
+    state.cards.set(c.id, c);
+    byHanzi.set(c.hanzi, c);
+    if (practice) texts.push(...cardTexts(c));
+    added++;
+  });
+  saveLocalNow(); Sync.soon(2000);
+  if (texts.length) Prefetch.add(texts);
+  closeEditor();
+  toast(`Imported ${added} new ${plural(added, 'word')}.` + (had ? ` ${had} you already had kept their progress.` : ''));
+  dataChanged();
+}
+
+/* ---------- speaking practice (Azure pronunciation assessment) ---------- */
+let paBusy = false;
+function paBox(btn) {
+  const ex = btn.closest('.ex-view');
+  if (ex) return ex.querySelector('[data-pa]');
+  const ans = btn.closest('.answer');
+  return ans ? ans.querySelector(':scope > [data-pa]') : null;
+}
+const paClass = v => v >= 80 ? 'ok' : v >= 60 ? 'mid' : 'bad';
+const paNum = v => v == null || isNaN(v) ? '–' : String(Math.round(v));
+function paHTML(par, heard) {
+  const score = par.pronunciationScore != null ? par.pronunciationScore : par.accuracyScore;
+  const det = par.detailResult || {};
+  const ws = Array.isArray(det.Words) ? det.Words : [];
+  const chips = ws.map(w => {
+    const a = w.PronunciationAssessment || {}, err = a.ErrorType && a.ErrorType !== 'None' ? a.ErrorType : '';
+    const v = a.AccuracyScore;
+    const cls = err === 'Omission' ? 'bad' : err === 'Insertion' ? 'mid' : paClass(v || 0);
+    const label = err === 'Omission' ? 'missed' : err === 'Insertion' ? 'extra' : paNum(v);
+    return `<span class="pa-w ${cls}"><b lang="zh-CN">${esc(w.Word)}</b><small>${label}</small></span>`;
+  }).join('');
+  const weak = ws.filter(w => { const a = w.PronunciationAssessment || {}; return (a.ErrorType && a.ErrorType !== 'None') || (a.AccuracyScore || 0) < 80; });
+  return `<div class="pa-top"><span class="pa-score ${paClass(score || 0)}">${paNum(score)}</span>
+      <span class="pa-sub">Accuracy ${paNum(par.accuracyScore)} · Fluency ${paNum(par.fluencyScore)} · Completeness ${paNum(par.completenessScore)}</span></div>
+    ${chips ? `<div class="pa-words">${chips}</div>` : ''}
+    ${heard ? `<p class="pa-heard">Heard: <span lang="zh-CN">${esc(heard)}</span></p>` : ''}
+    <p class="pa-tip">${(score || 0) >= 85 && !weak.length ? 'Sounds good.' : weak.length ? `Work on ${weak.slice(0, 3).map(w => esc(w.Word)).join(', ')}: listen again, copy the tones, then try once more.` : 'Listen again, copy the tones, then try once more.'}</p>`;
+}
+function paError(e) {
+  const m = String((e && (e.message || e.name)) || e || '');
+  if (/notallowed|permission|denied/i.test(m)) return 'Allow microphone access for this app, then try again.';
+  if (/1006|401|403|auth|subscription|key/i.test(m)) return 'Azure didn’t accept the key. Check it in Options.';
+  if (/microphone|audio source|getusermedia|notfound|device/i.test(m)) return 'Couldn’t use the microphone. Check that no other app is using it.';
+  if (m === 'timeout') return 'Azure took too long to answer. Try again.';
+  if (/sdk did not load/i.test(m)) return 'The speech library didn’t load. Check your connection.';
+  return 'Couldn’t check your pronunciation. Check your connection and try again.';
+}
+async function assess(ref, btn) {
+  ref = String(ref || '').trim();
+  if (!ref || paBusy) return;
+  if (!azureReady()) { toast('Add an Azure key in Options to use speaking practice.'); return; }
+  if (!navigator.onLine) { toast('Speaking practice needs a connection.'); return; }
+  const box = paBox(btn);
+  paBusy = true;
+  stopAudio();
+  const orig = btn.innerHTML;
+  btn.classList.add('rec');
+  if (btn.classList.contains('pill')) btn.innerHTML = ICON.mic + 'Listening…';
+  if (box) { box.hidden = false; box.innerHTML = '<p class="pa-wait">Listening… say it now.</p>'; }
+  let rec = null;
+  try {
+    const sdk = await loadSdk();
+    try { if (navigator.audioSession) navigator.audioSession.type = 'play-and-record'; } catch (e) {}
+    const cfg = sdk.SpeechConfig.fromSubscription(prefs.azKey, prefs.azRegion);
+    cfg.speechRecognitionLanguage = 'zh-CN';
+    rec = new sdk.SpeechRecognizer(cfg, sdk.AudioConfig.fromDefaultMicrophoneInput());
+    const pa = new sdk.PronunciationAssessmentConfig(ref, sdk.PronunciationAssessmentGradingSystem.HundredMark, sdk.PronunciationAssessmentGranularity.Phoneme, true);
+    pa.applyTo(rec);
+    const r = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout')), 20000);
+      rec.recognizeOnceAsync(x => { clearTimeout(timer); resolve(x); }, err => { clearTimeout(timer); reject(new Error(String(err))); });
+    });
+    if (r.reason === sdk.ResultReason.RecognizedSpeech) {
+      const par = sdk.PronunciationAssessmentResult.fromResult(r);
+      if (box) box.innerHTML = paHTML(par, r.text);
+    } else if (r.reason === sdk.ResultReason.NoMatch) {
+      if (box) box.innerHTML = '<p class="pa-wait">Didn’t catch that. Tap Say it and speak right after.</p>';
+    } else {
+      let detail = '';
+      try { const cd = sdk.CancellationDetails.fromResult(r); detail = (cd.errorDetails || '') + ' ' + (cd.errorCode != null ? cd.errorCode : ''); } catch (e) {}
+      throw new Error(detail || 'canceled');
+    }
+  } catch (e) {
+    if (box) box.innerHTML = `<p class="pa-wait err">${esc(paError(e))}</p>`;
+  } finally {
+    if (rec) { try { rec.close(); } catch (e) {} }
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+    paBusy = false;
+    btn.classList.remove('rec');
+    btn.innerHTML = orig;
+  }
+}
+
 /* ---------- views ---------- */
 const VIEWS = ['study', 'add', 'cards', 'stats', 'options'];
 function showView(name) {
@@ -1817,7 +2373,7 @@ function showView(name) {
   VIEWS.forEach(v => { $('#view-' + v).hidden = v !== name; });
   $$('.tab').forEach(t => { if (t.dataset.view === name) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current'); });
   if (name === 'options') $('#opt-btn').setAttribute('aria-current', 'page'); else $('#opt-btn').removeAttribute('aria-current');
-  if (name !== 'study') setActions(name === 'add' ? (addMode === 'many' ? BULK_BTN : SAVE_BTN) : '');
+  if (name !== 'study') setActions(name === 'add' ? addActions() : '');
   if (name === 'study') renderStudy();
   else if (name === 'add') renderAdd();
   else if (name === 'cards') renderCards();
@@ -1828,6 +2384,7 @@ function showView(name) {
 function dataChanged() {
   if (currentView === 'study') renderStudy();
   else if (currentView === 'cards') { renderChips(); renderCardList(); }
+  else if (currentView === 'add' && addMode === 'decks') renderDecks();
   else if (currentView === 'stats') renderStats();
   else if (currentView === 'options') { renderSyncUI(); renderAzureStatus(); }
 }
@@ -1874,6 +2431,18 @@ document.addEventListener('click', e => {
     case 'pick-toggle': togglePick(t); break;
     case 'fchip-toggle': t.setAttribute('aria-pressed', String(t.getAttribute('aria-pressed') !== 'true')); break;
     case 'add-mode': setAddMode(t.dataset.mode); break;
+    case 'go-decks': addMode = 'decks'; showView('add'); setAddMode('decks'); break;
+    case 'deck-add': addDeck(t.dataset.deck); break;
+    case 'deck-open': openDeck(t.dataset.deck); break;
+    case 'decks-retry': renderDecks(); break;
+    case 'fill-py': autoFillWord(t.closest('.form'), true); break;
+    case 'fill-missing': fillMissing(t); break;
+    case 'pick-practice': togglePractice(t); break;
+    case 'pick-all': pickAll(true); break;
+    case 'pick-none': armed(t, 'Tap again to stop', () => pickAll(false)); break;
+    case 'import-words': $('#import-words-file').click(); break;
+    case 'import-apply': applyImport(); break;
+    case 'assess': assess(t.dataset.ref, t); break;
     case 'bulk-add': bulkAdd(); break;
     case 'cram-start': startCram(scopeValid()); break;
     case 'cram-stop': cram = null; study = { id: null, revealed: false, animate: false }; renderStudy(); break;
@@ -1912,7 +2481,12 @@ document.addEventListener('input', e => {
       const before = convertPinyin(v.slice(0, pos)), after = convertPinyin(v.slice(pos));
       if (before + after !== v) { t.value = before + after; try { t.setSelectionRange(before.length, before.length); } catch (err) {} }
     }
-  } else if (t.matches('[data-k="hanzi"]')) checkDup(t);
+  } else if (t.matches('[data-k="hanzi"]')) {
+    checkDup(t);
+    if (!e.isComposing) { const form = t.closest('.form'); scheduleAuto(t, () => autoFillWord(form, false)); }
+  } else if (t.matches('.ex [data-k="zh"]')) {
+    if (!e.isComposing) { const block = t.closest('.ex'); scheduleAuto(t, () => autoFillSentence(block)); }
+  }
   else if (t.id === 'search') renderCardList();
   else if (t.id === 'opt-rate') $('#rate-val').textContent = parseFloat(t.value).toFixed(2) + '×';
   else if (t.id === 'opt-ret') $('#ret-val').textContent = Math.round(parseFloat(t.value) * 100) + '%';
@@ -1920,6 +2494,9 @@ document.addEventListener('input', e => {
 document.addEventListener('change', e => {
   const t = e.target;
   if (t.id === 'import-file') { handleImport(t); return; }
+  if (t.id === 'import-words-file') { handleWordImport(t); return; }
+  if (t.id === 'pick-in') { words.pickIn = t.value; renderCardList(); return; }
+  if (t.id === 'deck-practice') { deckPractice = t.checked; return; }
   if (t.id === 'scope') { prefs.scope = t.value; savePrefs(); cram = null; study = { id: null, revealed: false, animate: false }; renderStudy(); return; }
   if (t.dataset && t.dataset.pref === 'voice') {
     prefs.voice = t.value;
@@ -1939,12 +2516,18 @@ document.addEventListener('change', e => {
     s.autoplay = s.autoplayWhen !== 'off';          // keeps older versions of the app consistent
     const h = $('#autoplay-hint'); if (h) h.innerHTML = AUTOPLAY_HINTS[s.autoplayWhen];
   }
-  else if (k === 'autoplay' || k === 'toneColors') s[k] = t.checked;
+  else if (k === 'autoplay' || k === 'toneColors' || k === 'autoPinyin') s[k] = t.checked;
   else if (k === 'rate') s.rate = clamp(parseFloat(t.value) || 0.9, 0.5, 1.3);
   else if (k === 'retention') s.retention = clamp(parseFloat(t.value) || 0.9, 0.8, 0.97);
   else if (k === 'newPerDay') { s.newPerDay = clamp(parseInt(t.value, 10) || 0, 0, 999); t.value = s.newPerDay; }
   state.settings = s;
   persistSettings();
+});
+document.addEventListener('compositionend', e => {
+  const t = e.target;
+  if (!(t instanceof HTMLElement)) return;
+  if (t.matches('[data-k="hanzi"]')) { const form = t.closest('.form'); scheduleAuto(t, () => autoFillWord(form, false)); }
+  else if (t.matches('.ex [data-k="zh"]')) { const block = t.closest('.ex'); scheduleAuto(t, () => autoFillSentence(block)); }
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target && e.target.id === 'folder-name') { e.preventDefault(); const b = $('#folder-tools .btn'); if (b) b.click(); return; }

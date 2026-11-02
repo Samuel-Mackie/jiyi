@@ -1,0 +1,71 @@
+Jìyì – Chinese flashcards
+Copyright © 2026 Samuel Kjær Mackie. All rights reserved.
+
+This repository is public so that the app can be hosted on GitHub Pages.
+Being able to read the code does not give you permission to use it, except as
+described below.
+
+
+1. WHAT THIS COVERS
+
+The source code, design, text and original content of Jìyì (the "Work"),
+including app.js, index.html, sw.js, manifest.webmanifest, the icons,
+README.md, the program code in pinyin-auto.js, and the English glosses,
+example sentences, translations and notes in decks.js.
+
+It does not cover the third-party material listed in section 4.
+
+
+2. WHAT YOU MAY DO
+
+- Use the app at the address where the copyright holder publishes it, for your
+  own learning.
+- Read the source code, and fork it on GitHub to the extent GitHub's Terms of
+  Service allow.
+- Export, import and keep your own cards and study data. Your cards are yours.
+
+
+3. WHAT YOU MAY NOT DO WITHOUT WRITTEN PERMISSION
+
+- Copy, modify, merge, publish, host, distribute, sublicense or sell the Work
+  or any part of it.
+- Publish the app, or a modified version of it, on another website, in an app
+  store or as part of any other product or service.
+- Use the deck content (glosses, example sentences, translations and notes) in
+  another product, course or dataset.
+
+To ask for permission, contact the copyright holder through
+https://github.com/Samuel-Mackie.
+
+
+4. THIRD-PARTY MATERIAL
+
+These parts are not covered by sections 1–3 and stay under their own licenses:
+
+- speech-sdk.js: Microsoft Cognitive Services Speech SDK for JavaScript,
+  © Microsoft Corporation. See speech-sdk-LICENSE.txt.
+
+- pinyin-pro.js: pinyin-pro by zh-lx, MIT License.
+  See pinyin-pro-LICENSE.txt.
+
+- The HSK word lists in decks.js: complete-hsk-vocabulary by Yanis
+  Zafirópulos, MIT License. See complete-hsk-vocabulary-LICENSE.txt.
+
+- The pinyin readings in decks.js, and the word list and readings in the data
+  section of pinyin-auto.js, are derived from CC-CEDICT
+  (https://cc-cedict.org/), licensed under the Creative Commons
+  Attribution-ShareAlike 4.0 International License
+  (https://creativecommons.org/licenses/by-sa/4.0/). They were changed:
+  converted to tone marks, adjusted for 一/不 tone changes and neutral tones,
+  and combined with other word lists. This derived data is available under the
+  same CC BY-SA 4.0 license.
+
+
+5. NO WARRANTY
+
+The Work is provided "as is", without warranty of any kind, express or implied,
+including but not limited to the warranties of merchantability, fitness for a
+particular purpose and noninfringement. In no event shall the copyright holder
+be liable for any claim, damages or other liability, whether in an action of
+contract, tort or otherwise, arising from, out of or in connection with the
+Work or the use of or other dealings in the Work.
