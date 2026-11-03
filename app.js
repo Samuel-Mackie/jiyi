@@ -566,9 +566,13 @@ const SILENT = (() => {
   return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
 })();
 let playUrl = null, playBtn = null, playSeq = 0, unlocked = false;
+function setAudioSession(type) {
+  try { if (navigator.audioSession && navigator.audioSession.type !== type) navigator.audioSession.type = type; } catch (e) {}
+}
 // iOS only lets audio start after a network wait if the element was played during a tap first.
 function unlockAudio() {
-  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+  // Switching to 'playback' ends an open microphone on iOS, so leave the session alone while the mic is held.
+  if (!Mic.held()) setAudioSession('playback');
   if (unlocked) return;
   unlocked = true;
   try {
@@ -604,6 +608,7 @@ let lastAzToast = 0;
 async function speak(text, slow, btn) {
   text = String(text || '').trim();
   if (!text) return;
+  if (paStop) paStop();
   unlockAudio();
   const seq = ++playSeq;
   stopAudio();
@@ -2282,8 +2287,155 @@ async function applyImport() {
   dataChanged();
 }
 
+/* ---------- microphone (speaking practice) ---------- */
+// The app opens the microphone itself and keeps it open between words, so iOS asks for permission
+// once per study session instead of on every tap. Audio is captured at the device's own sample rate
+// and converted to 16 kHz 16-bit mono here, then pushed to Azure.
+const MIC_IDLE_MS = 60000;   // close the mic after this long without speaking practice
+const MIC_CHUNK = 640;       // 40 ms at 16 kHz
+const MIC_WORKLET = `class JiyiMic extends AudioWorkletProcessor {
+  constructor() { super(); this.r = sampleRate / 16000; this.t = 1; this.last = 0; this.buf = new Int16Array(${MIC_CHUNK}); this.n = 0; this.peak = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      const x = ch[i];
+      while (this.t <= 1) {
+        let y = this.last + (x - this.last) * this.t;
+        if (y > 1) y = 1; else if (y < -1) y = -1;
+        const a = y < 0 ? -y : y;
+        if (a > this.peak) this.peak = a;
+        this.buf[this.n++] = y < 0 ? y * 32768 : y * 32767;
+        if (this.n === this.buf.length) {
+          this.port.postMessage({ pcm: this.buf.buffer, peak: this.peak }, [this.buf.buffer]);
+          this.buf = new Int16Array(${MIC_CHUNK}); this.n = 0; this.peak = 0;
+        }
+        this.t += this.r;
+      }
+      this.t -= 1; this.last = x;
+    }
+    return true;
+  }
+}
+registerProcessor('jiyi-mic', JiyiMic);`;
+// Same conversion on the main thread, for browsers without AudioWorklet.
+function micResampler(rate, emit) {
+  const r = rate / 16000;
+  let t = 1, last = 0, buf = new Int16Array(MIC_CHUNK), n = 0, peak = 0;
+  return ch => {
+    for (let i = 0; i < ch.length; i++) {
+      const x = ch[i];
+      while (t <= 1) {
+        let y = last + (x - last) * t;
+        if (y > 1) y = 1; else if (y < -1) y = -1;
+        const a = y < 0 ? -y : y;
+        if (a > peak) peak = a;
+        buf[n++] = y < 0 ? y * 32768 : y * 32767;
+        if (n === buf.length) { emit(buf.buffer, peak); buf = new Int16Array(MIC_CHUNK); n = 0; peak = 0; }
+        t += r;
+      }
+      t -= 1; last = x;
+    }
+  };
+}
+const Mic = {
+  ctx: null, stream: null, src: null, lp: null, node: null, gum: null, mod: null, worklet: false,
+  url: null, idle: null, gen: 0,
+  held() { return !!(this.stream || this.gum); },
+  live() { return !!this.stream && this.stream.getAudioTracks().some(t => t.readyState === 'live'); },
+  // Must be called straight from the tap, before any await: iOS only starts audio inside a tap.
+  prepare() {
+    clearTimeout(this.idle); this.idle = null;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const md = navigator.mediaDevices;
+    if (!AC || !md || !md.getUserMedia) return Promise.reject(new Error('microphone unsupported'));
+    setAudioSession('play-and-record');
+    if (!this.ctx || this.ctx.state === 'closed') {
+      this.ctx = new AC();
+      this.src = this.lp = null; this.mod = null; this.worklet = false;
+    }
+    const ctx = this.ctx, gen = this.gen;
+    if (ctx.state !== 'running') { try { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
+    if (!this.mod) {
+      if (ctx.audioWorklet && window.AudioWorkletNode) {
+        if (!this.url) this.url = URL.createObjectURL(new Blob([MIC_WORKLET], { type: 'application/javascript' }));
+        this.mod = ctx.audioWorklet.addModule(this.url).then(() => { if (ctx === this.ctx) this.worklet = true; }, () => {});
+      } else this.mod = Promise.resolve();
+    }
+    if (!this.live() && !this.gum) {
+      const g = md.getUserMedia({ audio: { echoCancellation: false }, video: false }).then(s => {
+        if (gen !== this.gen) { s.getTracks().forEach(t => t.stop()); throw new Error('stopped'); }
+        if (this.stream) this.stream.getTracks().forEach(t => t.stop());
+        this.stream = s; this.src = this.lp = null;
+        s.getAudioTracks().forEach(t => t.addEventListener('ended', () => { if (this.stream === s) this.release(); }));
+        return s;
+      });
+      this.gum = g;
+      g.then(() => { if (this.gum === g) this.gum = null; }, () => { if (this.gum === g) this.gum = null; });
+    }
+    return Promise.all([this.gum, this.mod]).then(() => {
+      if (ctx !== this.ctx || !this.live()) throw new Error('stopped');
+      if (ctx.state === 'running') return;
+      // Now that the mic is capturing, iOS lets the audio context start even outside the tap.
+      return Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 3000))]).then(() => {
+        if (ctx.state !== 'running') throw new Error('microphone not running');
+      });
+    });
+  },
+  start(onChunk) {
+    clearTimeout(this.idle); this.idle = null;
+    const ctx = this.ctx;
+    if (!ctx || !this.live()) throw new Error('microphone not running');
+    if (!this.src) {
+      this.src = ctx.createMediaStreamSource(this.stream);
+      this.lp = ctx.createBiquadFilter();   // removes what 16 kHz can't hold before converting
+      this.lp.type = 'lowpass';
+      this.lp.frequency.value = Math.min(7000, ctx.sampleRate * 0.45);
+      this.lp.Q.value = 0.707;
+      this.src.connect(this.lp);
+    }
+    this.detach();
+    let node;
+    if (this.worklet) {
+      node = new AudioWorkletNode(ctx, 'jiyi-mic', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      node.port.onmessage = e => onChunk(e.data.pcm, e.data.peak);
+    } else {
+      node = ctx.createScriptProcessor(4096, 1, 1);
+      const feed = micResampler(ctx.sampleRate, onChunk);
+      node.onaudioprocess = e => feed(e.inputBuffer.getChannelData(0));
+    }
+    this.lp.connect(node);
+    node.connect(ctx.destination);   // outputs silence; keeps the node running
+    this.node = node;
+  },
+  detach() {
+    const n = this.node;
+    this.node = null;
+    if (!n) return;
+    try { this.lp.disconnect(n); } catch (e) {}
+    try { n.disconnect(); } catch (e) {}
+    if (n.port) n.port.onmessage = null; else n.onaudioprocess = null;
+  },
+  // Stop listening but keep the mic open for the next word.
+  stop() {
+    this.detach();
+    clearTimeout(this.idle);
+    this.idle = this.held() ? setTimeout(() => this.release(), MIC_IDLE_MS) : null;
+  },
+  release() {
+    this.gen++;
+    clearTimeout(this.idle); this.idle = null;
+    this.detach();
+    if (this.stream) this.stream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+    this.stream = this.src = this.lp = null; this.gum = null;
+    if (this.ctx) { try { const p = this.ctx.close(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
+    this.ctx = null; this.mod = null; this.worklet = false;
+    setAudioSession('playback');
+  }
+};
+
 /* ---------- speaking practice (Azure pronunciation assessment) ---------- */
-let paBusy = false;
+let paBusy = false, paStop = null;
 function paBox(btn) {
   const ex = btn.closest('.ex-view');
   if (ex) return ex.querySelector('[data-pa]');
@@ -2313,52 +2465,83 @@ function paHTML(par, heard) {
 function paError(e) {
   const m = String((e && (e.message || e.name)) || e || '');
   if (/notallowed|permission|denied/i.test(m)) return 'Allow microphone access for this app, then try again.';
-  if (/1006|401|403|auth|subscription|key/i.test(m)) return 'Azure didn’t accept the key. Check it in Options.';
-  if (/microphone|audio source|getusermedia|notfound|device/i.test(m)) return 'Couldn’t use the microphone. Check that no other app is using it.';
+  if (/1006|unable to contact|connection/i.test(m)) return 'Couldn’t reach Azure. Check your connection and try again.';
+  if (/401|403|auth|subscription|key/i.test(m)) return 'Azure didn’t accept the key. Check it in Options.';
+  if (/microphone|audio source|getusermedia|notfound|notreadable|device/i.test(m)) return 'Couldn’t use the microphone. Check that no other app is using it.';
   if (m === 'timeout') return 'Azure took too long to answer. Try again.';
   if (/sdk did not load/i.test(m)) return 'The speech library didn’t load. Check your connection.';
   return 'Couldn’t check your pronunciation. Check your connection and try again.';
 }
+const paLevel = (el, peak) => { if (el) el.style.transform = `scaleX(${Math.min(1, Math.sqrt(peak) * 1.3).toFixed(3)})`; };
 async function assess(ref, btn) {
   ref = String(ref || '').trim();
-  if (!ref || paBusy) return;
+  if (paBusy) { if (paStop) paStop(); return; }   // a second tap stops listening
+  if (!ref) return;
   if (!azureReady()) { toast('Add an Azure key in Options to use speaking practice.'); return; }
   if (!navigator.onLine) { toast('Speaking practice needs a connection.'); return; }
+  let micReady;
+  try { micReady = Mic.prepare(); } catch (e) { micReady = Promise.reject(e); }   // still inside the tap
+  micReady.catch(() => {});
   const box = paBox(btn);
   paBusy = true;
   stopAudio();
   const orig = btn.innerHTML;
   btn.classList.add('rec');
-  if (btn.classList.contains('pill')) btn.innerHTML = ICON.mic + 'Listening…';
-  if (box) { box.hidden = false; box.innerHTML = '<p class="pa-wait">Listening… say it now.</p>'; }
-  let rec = null;
+  if (btn.classList.contains('pill')) btn.innerHTML = ICON.mic + 'Stop';
+  if (box) { box.hidden = false; box.innerHTML = '<p class="pa-wait">Starting the microphone…</p>'; }
+  let rec = null, push = null, ended = false, cap = null;
+  const finish = () => {
+    if (ended) return;
+    ended = true;
+    clearTimeout(cap);
+    Mic.stop();
+    if (push) { try { push.close(); } catch (e) {} }
+  };
+  paStop = finish;
   try {
-    const sdk = await loadSdk();
-    try { if (navigator.audioSession) navigator.audioSession.type = 'play-and-record'; } catch (e) {}
+    const [sdk] = await Promise.all([loadSdk(), micReady]);
+    if (ended) throw new Error('stopped');
     const cfg = sdk.SpeechConfig.fromSubscription(prefs.azKey, prefs.azRegion);
     cfg.speechRecognitionLanguage = 'zh-CN';
-    rec = new sdk.SpeechRecognizer(cfg, sdk.AudioConfig.fromDefaultMicrophoneInput());
+    push = sdk.AudioInputStream.createPushStream(sdk.AudioStreamFormat.getWaveFormatPCM(16000, 16, 1));
+    rec = new sdk.SpeechRecognizer(cfg, sdk.AudioConfig.fromStreamInput(push));
     const pa = new sdk.PronunciationAssessmentConfig(ref, sdk.PronunciationAssessmentGradingSystem.HundredMark, sdk.PronunciationAssessmentGranularity.Phoneme, true);
     pa.applyTo(rec);
-    const r = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('timeout')), 20000);
-      rec.recognizeOnceAsync(x => { clearTimeout(timer); resolve(x); }, err => { clearTimeout(timer); reject(new Error(String(err))); });
+    if (box) box.innerHTML = '<p class="pa-wait">Listening… say it now.</p><div class="pa-lvl" aria-hidden="true"><i></i></div>';
+    const lvl = box ? box.querySelector('.pa-lvl i') : null;
+    Mic.start((pcm, peak) => {
+      if (ended) return;
+      try { push.write(pcm); } catch (e) {}
+      paLevel(lvl, peak);
     });
+    cap = setTimeout(finish, 12000);   // stop listening after 12 s; Azure then scores what it heard
+    const r = await new Promise((resolve, reject) => {
+      const guard = setTimeout(() => reject(new Error('timeout')), 25000);
+      rec.recognizeOnceAsync(x => { clearTimeout(guard); resolve(x); }, err => { clearTimeout(guard); reject(new Error(String(err))); });
+    });
+    finish();
     if (r.reason === sdk.ResultReason.RecognizedSpeech) {
       const par = sdk.PronunciationAssessmentResult.fromResult(r);
       if (box) box.innerHTML = paHTML(par, r.text);
     } else if (r.reason === sdk.ResultReason.NoMatch) {
-      if (box) box.innerHTML = '<p class="pa-wait">Didn’t catch that. Tap Say it and speak right after.</p>';
+      if (box) box.innerHTML = '<p class="pa-wait">Didn’t catch that. Tap Say it and try again.</p>';
     } else {
       let detail = '';
       try { const cd = sdk.CancellationDetails.fromResult(r); detail = (cd.errorDetails || '') + ' ' + (cd.errorCode != null ? cd.errorCode : ''); } catch (e) {}
       throw new Error(detail || 'canceled');
     }
   } catch (e) {
-    if (box) box.innerHTML = `<p class="pa-wait err">${esc(paError(e))}</p>`;
+    const m = String((e && e.message) || '');
+    if (box) {
+      if (m === 'stopped') { box.innerHTML = ''; box.hidden = true; }
+      else box.innerHTML = `<p class="pa-wait err">${esc(paError(e))}</p>`;
+    }
+    // A failed or denied microphone shouldn't stay half-open.
+    if (m !== 'stopped' && !Mic.live()) Mic.release();
   } finally {
+    finish();
     if (rec) { try { rec.close(); } catch (e) {} }
-    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+    paStop = null;
     paBusy = false;
     btn.classList.remove('rec');
     btn.innerHTML = orig;
@@ -2369,6 +2552,7 @@ async function assess(ref, btn) {
 const VIEWS = ['study', 'add', 'cards', 'stats', 'options'];
 function showView(name) {
   if (!VIEWS.includes(name)) name = 'study';
+  if (name !== 'study') { if (paStop) paStop(); Mic.release(); }
   currentView = name;
   VIEWS.forEach(v => { $('#view-' + v).hidden = v !== name; });
   $$('.tab').forEach(t => { if (t.dataset.view === name) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current'); });
@@ -2542,6 +2726,8 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
+    if (paStop) paStop();
+    Mic.release();
     saveLocalNow();
     if (Sync.enabled() && Sync.dirtySince) Sync.run();
   } else {
