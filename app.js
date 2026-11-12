@@ -42,7 +42,8 @@ const ICON = {
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 5v14l11.5-7z" fill="currentColor"/></svg>',
   plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
-  mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>'
+  mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>',
+  stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor"/></svg>'
 };
 const GRID_SVG = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" fill="none" stroke="currentColor"><path d="M0 50H100M50 0V100" stroke-width="1" stroke-dasharray="4 3.5"/><path d="M0 0L100 100M100 0L0 100" stroke-width=".8" stroke-dasharray="2 4" opacity=".6"/></svg>';
 
@@ -2454,13 +2455,14 @@ async function applyImport() {
 }
 
 /* ---------- microphone (speaking practice) ---------- */
-// The app opens the microphone itself and keeps it open between words, so iOS asks for permission
-// once per study session instead of on every tap. Audio is captured at the device's own sample rate
-// and converted to 16 kHz 16-bit mono here, then pushed to Azure.
-const MIC_IDLE_MS = 60000;   // close the mic after this long without speaking practice
-const MIC_CHUNK = 640;       // 40 ms at 16 kHz
+// The app opens the microphone itself and keeps it open while you use the app, because an iPhone
+// home-screen app asks for permission again every time the microphone is reopened. The Mic on button
+// at the top shows it's open and turns it off. Audio is captured at the device's own sample rate and
+// converted to 16 kHz 16-bit mono here, then pushed to Azure.
+const MIC_IDLE_MS = 10 * 60000;   // close the mic after this long without touching the app
+const MIC_CHUNK = 640;            // 40 ms at 16 kHz
 const MIC_WORKLET = `class JiyiMic extends AudioWorkletProcessor {
-  constructor() { super(); this.r = sampleRate / 16000; this.t = 1; this.last = 0; this.buf = new Int16Array(${MIC_CHUNK}); this.n = 0; this.peak = 0; }
+  constructor() { super(); this.r = sampleRate / 16000; this.t = 1; this.last = 0; this.buf = new Int16Array(${MIC_CHUNK}); this.n = 0; this.peak = 0; this.ss = 0; }
   process(inputs) {
     const ch = inputs[0] && inputs[0][0];
     if (!ch) return true;
@@ -2471,10 +2473,11 @@ const MIC_WORKLET = `class JiyiMic extends AudioWorkletProcessor {
         if (y > 1) y = 1; else if (y < -1) y = -1;
         const a = y < 0 ? -y : y;
         if (a > this.peak) this.peak = a;
+        this.ss += y * y;
         this.buf[this.n++] = y < 0 ? y * 32768 : y * 32767;
         if (this.n === this.buf.length) {
-          this.port.postMessage({ pcm: this.buf.buffer, peak: this.peak }, [this.buf.buffer]);
-          this.buf = new Int16Array(${MIC_CHUNK}); this.n = 0; this.peak = 0;
+          this.port.postMessage({ pcm: this.buf.buffer, peak: this.peak, rms: Math.sqrt(this.ss / this.n) }, [this.buf.buffer]);
+          this.buf = new Int16Array(${MIC_CHUNK}); this.n = 0; this.peak = 0; this.ss = 0;
         }
         this.t += this.r;
       }
@@ -2487,7 +2490,7 @@ registerProcessor('jiyi-mic', JiyiMic);`;
 // Same conversion on the main thread, for browsers without AudioWorklet.
 function micResampler(rate, emit) {
   const r = rate / 16000;
-  let t = 1, last = 0, buf = new Int16Array(MIC_CHUNK), n = 0, peak = 0;
+  let t = 1, last = 0, buf = new Int16Array(MIC_CHUNK), n = 0, peak = 0, ss = 0;
   return ch => {
     for (let i = 0; i < ch.length; i++) {
       const x = ch[i];
@@ -2496,8 +2499,9 @@ function micResampler(rate, emit) {
         if (y > 1) y = 1; else if (y < -1) y = -1;
         const a = y < 0 ? -y : y;
         if (a > peak) peak = a;
+        ss += y * y;
         buf[n++] = y < 0 ? y * 32768 : y * 32767;
-        if (n === buf.length) { emit(buf.buffer, peak); buf = new Int16Array(MIC_CHUNK); n = 0; peak = 0; }
+        if (n === buf.length) { emit(buf.buffer, peak, Math.sqrt(ss / n)); buf = new Int16Array(MIC_CHUNK); n = 0; peak = 0; ss = 0; }
         t += r;
       }
       t -= 1; last = x;
@@ -2508,7 +2512,8 @@ const Mic = {
   ctx: null, stream: null, src: null, lp: null, node: null, gum: null, mod: null, worklet: false,
   url: null, idle: null, gen: 0,
   held() { return !!(this.stream || this.gum); },
-  live() { return !!this.stream && this.stream.getAudioTracks().some(t => t.readyState === 'live'); },
+  // A muted track (another app took the microphone) delivers silence, so it counts as not live and is reopened.
+  live() { return !!this.stream && this.stream.getAudioTracks().some(t => t.readyState === 'live' && !t.muted); },
   // Must be called straight from the tap, before any await: iOS only starts audio inside a tap.
   prepare() {
     clearTimeout(this.idle); this.idle = null;
@@ -2534,6 +2539,7 @@ const Mic = {
         if (this.stream) this.stream.getTracks().forEach(t => t.stop());
         this.stream = s; this.src = this.lp = null;
         s.getAudioTracks().forEach(t => t.addEventListener('ended', () => { if (this.stream === s) this.release(); }));
+        renderMicUI();
         return s;
       });
       this.gum = g;
@@ -2564,7 +2570,7 @@ const Mic = {
     let node;
     if (this.worklet) {
       node = new AudioWorkletNode(ctx, 'jiyi-mic', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
-      node.port.onmessage = e => onChunk(e.data.pcm, e.data.peak);
+      node.port.onmessage = e => onChunk(e.data.pcm, e.data.peak, e.data.rms);
     } else {
       node = ctx.createScriptProcessor(4096, 1, 1);
       const feed = micResampler(ctx.sampleRate, onChunk);
@@ -2585,8 +2591,13 @@ const Mic = {
   // Stop listening but keep the mic open for the next word.
   stop() {
     this.detach();
+    this.touch();
+  },
+  // Any use of the app keeps an open mic open; it closes after MIC_IDLE_MS without a touch.
+  touch() {
+    if (!this.held() || this.node) return;
     clearTimeout(this.idle);
-    this.idle = this.held() ? setTimeout(() => this.release(), MIC_IDLE_MS) : null;
+    this.idle = setTimeout(() => this.release(), MIC_IDLE_MS);
   },
   release() {
     this.gen++;
@@ -2597,8 +2608,36 @@ const Mic = {
     if (this.ctx) { try { const p = this.ctx.close(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
     this.ctx = null; this.mod = null; this.worklet = false;
     setAudioSession('playback');
+    renderMicUI();
   }
 };
+function renderMicUI() { const b = $('#mic-btn'); if (b) b.hidden = !Mic.stream; }
+document.addEventListener('pointerdown', () => Mic.touch(), true);
+document.addEventListener('keydown', () => Mic.touch(), true);
+
+// Decides on the device when you've finished speaking, from the level of each 40 ms chunk, so listening
+// doesn't depend on Azure noticing the silence. It learns the background noise first, needs 120 ms
+// clearly above it to count as speech, then ends after endMs of quiet.
+const PA_NO_SPEECH_MS = 6000;
+function speechEnd(endMs) {
+  let floor = null, peakDb = -100, above = 0, quiet = 0, t = 0;
+  const v = { heard: false, live: false, ms: 0, step };
+  function step(rms) {
+    t += 40; v.ms = t;
+    const db = rms > 1e-6 ? 20 * Math.log10(rms) : -120;
+    if (db > -120) v.live = true;
+    if (floor == null) { if (db > -120) floor = db; return !v.heard && t >= PA_NO_SPEECH_MS ? 'none' : ''; }
+    if (!v.heard) {
+      if (db > Math.max(floor + 10, -60)) { above++; peakDb = Math.max(peakDb, db); if (above >= 3) v.heard = true; }
+      else { above = 0; peakDb = -100; floor += (db - floor) * (db < floor ? 0.3 : 0.03); }
+      return !v.heard && t >= PA_NO_SPEECH_MS ? 'none' : '';
+    }
+    if (db > peakDb) peakDb = db;
+    quiet = db > Math.max(floor + 6, peakDb - 30) ? 0 : quiet + 40;
+    return quiet >= endMs ? 'end' : '';
+  }
+  return v;
+}
 
 /* ---------- speaking practice (Azure pronunciation assessment) ---------- */
 let paBusy = false, paStop = null;
@@ -2651,38 +2690,65 @@ async function assess(ref, btn) {
   const box = paBox(btn);
   paBusy = true;
   stopAudio();
-  const orig = btn.innerHTML;
+  // A word gets a shorter pause before listening ends than a sentence, where you may stop between phrases.
+  const word = Array.from(ref).length <= 6;
+  const endMs = word ? 800 : 1200, maxMs = word ? 8000 : 15000;
+  const orig = btn.innerHTML, origLabel = btn.getAttribute('aria-label');
+  const pill = btn.classList.contains('pill');
   btn.classList.add('rec');
-  if (btn.classList.contains('pill')) btn.innerHTML = ICON.mic + 'Stop';
-  if (box) { box.hidden = false; box.innerHTML = '<p class="pa-wait">Starting the microphone…</p>'; }
-  let rec = null, push = null, ended = false, cap = null;
+  btn.innerHTML = pill ? ICON.stop + 'Stop' : ICON.stop;
+  if (!pill) btn.setAttribute('aria-label', 'Stop listening');
+  const restoreBtn = () => {
+    btn.classList.remove('rec');
+    btn.innerHTML = orig;
+    if (origLabel == null) btn.removeAttribute('aria-label'); else btn.setAttribute('aria-label', origLabel);
+  };
+  const stopBtn = '<button type="button" class="pa-stop" data-act="pa-stop">' + ICON.stop + 'Stop</button>';
+  if (box) { box.hidden = false; box.innerHTML = '<p class="pa-wait">Starting the microphone…</p>' + stopBtn; }
+  let rec = null, push = null, ended = false, cap = null, azHeard = false;
+  const vad = speechEnd(endMs);
+  // Ends listening; Azure then scores everything it got so far.
   const finish = () => {
     if (ended) return;
     ended = true;
     clearTimeout(cap);
     Mic.stop();
-    if (push) { try { push.close(); } catch (e) {} }
+    if (push) {
+      try { push.close(); } catch (e) {}
+      if (btn.isConnected) restoreBtn();
+      if (box && box.isConnected) box.innerHTML = '<p class="pa-wait">Checking…</p>';
+    }
   };
   paStop = finish;
   try {
     const [sdk] = await Promise.all([loadSdk(), micReady]);
-    if (ended) throw new Error('stopped');
+    if (ended || !btn.isConnected) throw new Error('stopped');
     const cfg = sdk.SpeechConfig.fromSubscription(prefs.azKey, prefs.azRegion);
     cfg.speechRecognitionLanguage = 'zh-CN';
+    // Azure's own silence detection, as a backup for the one on the device.
+    try {
+      cfg.setProperty(sdk.PropertyId.Speech_SegmentationSilenceTimeoutMs, String(endMs));
+      cfg.setProperty(sdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, String(PA_NO_SPEECH_MS));
+    } catch (e) {}
     push = sdk.AudioInputStream.createPushStream(sdk.AudioStreamFormat.getWaveFormatPCM(16000, 16, 1));
     rec = new sdk.SpeechRecognizer(cfg, sdk.AudioConfig.fromStreamInput(push));
     const pa = new sdk.PronunciationAssessmentConfig(ref, sdk.PronunciationAssessmentGradingSystem.HundredMark, sdk.PronunciationAssessmentGranularity.Phoneme, true);
     pa.applyTo(rec);
-    if (box) box.innerHTML = '<p class="pa-wait">Listening… say it now.</p><div class="pa-lvl" aria-hidden="true"><i></i></div>';
+    rec.speechStartDetected = () => { azHeard = true; };
+    rec.speechEndDetected = () => finish();
+    if (box) box.innerHTML = '<p class="pa-wait">Listening… say it now.</p><div class="pa-lvl" aria-hidden="true"><i></i></div>' + stopBtn;
     const lvl = box ? box.querySelector('.pa-lvl i') : null;
-    Mic.start((pcm, peak) => {
+    Mic.start((pcm, peak, rms) => {
       if (ended) return;
+      if (!btn.isConnected) { finish(); return; }       // the card changed: stop listening
       try { push.write(pcm); } catch (e) {}
       paLevel(lvl, peak);
+      const st = vad.step(rms);
+      if (st === 'end' || (st === 'none' && !azHeard)) finish();
     });
-    cap = setTimeout(finish, 12000);   // stop listening after 12 s; Azure then scores what it heard
+    cap = setTimeout(finish, maxMs);
     const r = await new Promise((resolve, reject) => {
-      const guard = setTimeout(() => reject(new Error('timeout')), 25000);
+      const guard = setTimeout(() => reject(new Error('timeout')), maxMs + 12000);
       rec.recognizeOnceAsync(x => { clearTimeout(guard); resolve(x); }, err => { clearTimeout(guard); reject(new Error(String(err))); });
     });
     finish();
@@ -2690,7 +2756,11 @@ async function assess(ref, btn) {
       const par = sdk.PronunciationAssessmentResult.fromResult(r);
       if (box) box.innerHTML = paHTML(par, r.text);
     } else if (r.reason === sdk.ResultReason.NoMatch) {
-      if (box) box.innerHTML = '<p class="pa-wait">Didn’t catch that. Tap Say it and try again.</p>';
+      if (box) box.innerHTML = vad.heard || azHeard
+        ? '<p class="pa-wait">Didn’t catch that. Tap Say it and try again.</p>'
+        : '<p class="pa-wait">Didn’t hear anything. Tap Say it and speak once it says Listening.</p>';
+      // A second or more of pure digital silence means the microphone isn't delivering audio: reopen it next time.
+      if ((vad.ms >= 1000 && !vad.live) || !Mic.live()) Mic.release();
     } else {
       let detail = '';
       try { const cd = sdk.CancellationDetails.fromResult(r); detail = (cd.errorDetails || '') + ' ' + (cd.errorCode != null ? cd.errorCode : ''); } catch (e) {}
@@ -2709,8 +2779,7 @@ async function assess(ref, btn) {
     if (rec) { try { rec.close(); } catch (e) {} }
     paStop = null;
     paBusy = false;
-    btn.classList.remove('rec');
-    btn.innerHTML = orig;
+    restoreBtn();
   }
 }
 
@@ -2718,7 +2787,7 @@ async function assess(ref, btn) {
 const VIEWS = ['study', 'add', 'cards', 'stats', 'options'];
 function showView(name) {
   if (!VIEWS.includes(name)) name = 'study';
-  if (name !== 'study') { if (paStop) paStop(); Mic.release(); }
+  if (name !== 'study' && paStop) paStop();      // stop listening; the mic itself stays open (see Mic)
   currentView = name;
   VIEWS.forEach(v => { $('#view-' + v).hidden = v !== name; });
   $$('.tab').forEach(t => { if (t.dataset.view === name) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current'); });
@@ -2794,6 +2863,8 @@ document.addEventListener('click', e => {
     case 'import-words': $('#import-words-file').click(); break;
     case 'import-apply': applyImport(); break;
     case 'assess': assess(t.dataset.ref, t); break;
+    case 'pa-stop': if (paStop) paStop(); break;
+    case 'mic-off': if (paStop) paStop(); Mic.release(); toast('Microphone off'); break;
     case 'bulk-add': bulkAdd(); break;
     case 'cram-start': startCram(scopeValid()); break;
     case 'cram-stop': cram = null; study = { id: null, dir: 'r', revealed: false, animate: false }; renderStudy(); break;
@@ -2885,6 +2956,7 @@ document.addEventListener('compositionend', e => {
 document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target && e.target.id === 'folder-name') { e.preventDefault(); const b = $('#folder-tools .btn'); if (b) b.click(); return; }
   if (currentView !== 'study' || editing) return;
+  if (e.key === 'Escape' && paStop) { e.preventDefault(); paStop(); return; }
   if (e.target.closest && e.target.closest('input,textarea,select')) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (!study.id) return;
@@ -2897,7 +2969,9 @@ document.addEventListener('keydown', e => {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     if (paStop) paStop();
-    Mic.release();
+    // iOS pauses the microphone in the background and can resume it without asking again, so keep it there.
+    // Other browsers would keep recording in the background, and they remember the permission anyway.
+    if (!isIOS) Mic.release();
     saveLocalNow();
     if (Sync.enabled() && Sync.dirtySince) Sync.run();
   } else {

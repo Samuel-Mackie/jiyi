@@ -367,12 +367,22 @@ input[type=range]{width:100%;accent-color:var(--cobalt);margin:6px 0}
 .sp-same span{font-family:var(--han);font-size:17px;font-weight:500;color:var(--ink)}
 .sp-acts{display:grid;grid-template-columns:1fr 2fr;gap:8px}
 .rates.two{grid-template-columns:repeat(2,1fr)}
+
+/* listening: stop control and the open-microphone indicator */
+.pa-stop{display:inline-flex;align-items:center;gap:6px;margin-top:10px;border:1px solid var(--again);background:var(--surface);color:var(--again);border-radius:999px;padding:6px 16px 6px 12px;min-height:38px;font-size:14.5px;font-weight:600}
+.pa-stop svg,.pill.rec svg,.chip.rec svg{width:14px;height:14px}
+.mic-on{display:inline-flex;align-items:center;gap:5px;margin-right:4px;border:1px solid var(--again);background:var(--again-soft);color:var(--again);border-radius:999px;padding:4px 9px 4px 8px;min-height:34px;font-size:13px;font-weight:600}
+.mic-on svg{width:14px;height:14px}
+.mic-on .x{width:12px;height:12px;opacity:.75;margin-left:1px}
 </style>
 </head>
 <body>
 <header class="top">
   <div class="brand"><span class="seal" lang="zh-CN" aria-hidden="true">记</span><span>Jìyì</span></div>
   <div class="top-actions">
+  <button class="mic-on" id="mic-btn" data-act="mic-off" aria-label="Microphone is on. Turn it off" hidden>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg><span>Mic on</span><svg class="x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>
+  </button>
   <button class="icon-btn" id="sync-btn" data-act="sync-now" data-state="off" aria-label="Sync now" hidden>
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7.2 18.5h10.3a4 4 0 0 0 .5-7.97A6 6 0 0 0 6.5 9.4a4.6 4.6 0 0 0 .7 9.1z"/><path class="m-ok" d="M9.6 14l1.8 1.8 3.4-3.6"/><path class="m-err" d="M12 11.3v2.8M12 16.4h.01"/></svg>
   </button>

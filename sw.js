@@ -1,10 +1,11 @@
 // Offline cache for Jìyì. Bump VERSION whenever you upload changed files,
 // so phones pick up the new version on their next launch.
-const VERSION = 'jiyi-v7';
+const VERSION = 'jiyi-v8';
 const FILES = ['./', './index.html', './app.js', './speech-sdk.js', './decks.js', './pinyin-pro.js', './pinyin-auto.js', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache, so a new version never starts with old files.
+  e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES.map(f => new Request(f, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()

@@ -75,7 +75,9 @@ Audio for every word and sentence is generated once, saved on the phone and play
 
 With a key, the back of each card also has a **Say it** button. Say the word (or tap the microphone next to an example sentence), and Azure scores your pronunciation character by character. The app needs microphone access for this, and it uses speech recognition on the same Azure resource.
 
-Listening stops by itself when you finish speaking; tap **Stop** to end it early. The microphone stays open while you study and closes after a minute without speaking practice, when you leave Study, or when you switch apps. An app on the iPhone home screen asks for the microphone again after that; in a Safari tab you can set the microphone to **Allow** for the site so it never asks.
+Listening stops by itself about a second after you finish speaking; tap **Stop** (or press Esc) to end it early. Moving on to the next card also stops it.
+
+The microphone stays open while you use the app, so it only asks for permission once: an app on the iPhone home screen asks again every time the microphone is reopened. While it's open, **Mic on** shows at the top; tap it to turn the microphone off. It also closes after 10 minutes without touching the app. On Android and computers it closes when you switch apps, since those browsers remember the permission. In a Safari tab you can set the microphone to **Allow** for the site so it never asks.
 
 ## 5. Sync between devices (optional)
 
