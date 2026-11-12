@@ -997,15 +997,6 @@ function answerHTML(c, animate, extra) {
   </div>`;
 }
 /* ---------- speaking cards ---------- */
-// Empty 田字格 cells, one per character, so you know how long the word is.
-function spCells(c) {
-  const chars = Array.from((c.hanzi || '').replace(/\s+/g, ''));
-  const n = chars.length, label = `${n} ${plural(n, 'character')}`;
-  if (n && n <= 6 && chars.every(ch => HAN.test(ch))) {
-    return `<div class="tzg sp-cells" style="--n:${n}" role="img" aria-label="${label}">${chars.map(() => `<span class="cell empty">${GRID_SVG}</span>`).join('')}</div>`;
-  }
-  return `<p class="sp-count">${label}</p>`;
-}
 // A hint from the example sentences: the sentence with the word blanked out, or else just an English translation.
 function spHint(c) {
   const ss = c.sentences || [], w = (c.hanzi || '').trim();
@@ -1129,7 +1120,7 @@ function renderStudy() {
     // English on the front, no audio: you say the word yourself, then flip.
     const hint = spHint(c);
     el.innerHTML = head + `<div class="study-card sp-card" data-act="show" role="button" tabindex="0" aria-label="Show answer">${badge}
-      <p class="sp-prompt">${esc(c.english)}</p>${spCells(c)}${study.hinted && hint ? spHintHTML(hint) : ''}<p class="tap-hint">Say it aloud, then tap</p></div>`;
+      <p class="sp-prompt">${esc(c.english)}</p>${study.hinted && hint ? spHintHTML(hint) : ''}<p class="tap-hint">Say it aloud, then tap</p></div>`;
     setActions(hint && !study.hinted
       ? '<div class="sp-acts"><button class="btn secondary" data-act="sp-hint">Hint</button><button class="btn" data-act="show">Show answer</button></div>'
       : '<button class="btn" data-act="show">Show answer</button>');
