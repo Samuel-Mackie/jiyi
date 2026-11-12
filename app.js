@@ -13,7 +13,7 @@ const MAX_IVL = 36500, DAY_START_HOUR = 4;
 // FSRS-5 default parameters
 const W = [0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046, 1.54575, 0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315, 2.9898, 0.51655, 0.6621];
 const DECAY = -0.5, FACTOR = 19 / 81;
-const DEFAULTS = { rate: 0.9, autoplay: true, newPerDay: 15, retention: 0.9, toneColors: true, autoPinyin: true, extra: { day: '', n: 0 }, mod: 0 };
+const DEFAULTS = { rate: 0.9, autoplay: true, newPerDay: 15, retention: 0.9, toneColors: true, autoPinyin: true, speakCards: false, speakNewPerDay: 10, extra: { day: '', n: 0 }, mod: 0 };
 const PREF_DEFAULTS = { voice: '', voiceName: '', azKey: '', azRegion: '', ghToken: '', gistId: '', scope: 'all' };
 const AUTOPLAY_HINTS = {
   front: '<b>Better for listening and speaking.</b> You hear every word with its characters before you answer, so you can repeat it aloud. It no longer tests whether you remember the pronunciation yourself.',
@@ -36,6 +36,7 @@ const AZ_VOICES = [
 ];
 const AZ_REGIONS = ['eastasia', 'southeastasia', 'japaneast', 'koreacentral', 'centralindia', 'australiaeast', 'westeurope', 'northeurope', 'uksouth', 'francecentral', 'germanywestcentral', 'swedencentral', 'eastus', 'eastus2', 'westus', 'westus2', 'westus3', 'centralus', 'canadacentral', 'brazilsouth'];
 const HAN = /\p{Script=Han}/u;
+const SP_UNLOCK_S = 7;            // reading stability (days) a word needs before it joins speaking
 
 const ICON = {
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 5v14l11.5-7z" fill="currentColor"/></svg>',
@@ -48,7 +49,7 @@ const GRID_SVG = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hid
 /* ---------- state ---------- */
 const state = { cards: new Map(), settings: { ...DEFAULTS }, logs: new Map(), days: new Map(), tomb: new Map(), undone: new Map(), folders: new Map(), ftomb: new Map() };
 let prefs = { ...PREF_DEFAULTS };
-let study = { id: null, revealed: false, animate: false };
+let study = { id: null, dir: 'r', revealed: false, animate: false };   // also: fresh, heard, hinted
 let lastUndo = null;
 let currentView = 'study';
 let addForm = null, editing = null;
@@ -245,9 +246,30 @@ function normalizeCard(c) {
     lapses: Number(c.lapses) || 0,
     last: Number(c.last) || null,
     practice: c.practice !== false,
-    folders: Array.isArray(c.folders) ? [...new Set(c.folders.map(String))].slice(0, 50) : []
+    folders: Array.isArray(c.folders) ? [...new Set(c.folders.map(String))].slice(0, 50) : [],
+    sp: normSp(c.sp)
   };
   n.mod = Number(c.mod) || Math.max(n.updated, n.last || 0, n.created);
+  if (n.state !== NEW && !(n.stability > 0)) n.state = NEW;
+  if (n.state !== NEW && !(n.difficulty >= 1)) n.difficulty = initD(3);
+  return n;
+}
+// The speaking side (English → say the Chinese) has its own schedule. null: never started.
+// sp.mod is the time of its last change; only sync uses it.
+function normSp(sp) {
+  if (!sp || typeof sp !== 'object' || Array.isArray(sp)) return null;
+  const n = {
+    state: [NEW, LEARNING, REVIEW, RELEARNING].includes(sp.state) ? sp.state : NEW,
+    due: Number(sp.due) || 0,
+    stability: Number(sp.stability) || 0,
+    difficulty: Number(sp.difficulty) || 0,
+    step: Number(sp.step) || 0,
+    ivl: Number(sp.ivl) || 0,
+    reps: Number(sp.reps) || 0,
+    lapses: Number(sp.lapses) || 0,
+    last: Number(sp.last) || null,
+    mod: Number(sp.mod) || 0
+  };
   if (n.state !== NEW && !(n.stability > 0)) n.state = NEW;
   if (n.state !== NEW && !(n.difficulty >= 1)) n.difficulty = initD(3);
   return n;
@@ -259,11 +281,20 @@ function autoplayMode() {
   return s.autoplay === false ? 'off' : 'back';
 }
 function blankSchedule() { return { state: NEW, due: Date.now(), stability: 0, difficulty: 0, step: 0, ivl: 0, reps: 0, lapses: 0, last: null }; }
+const blankSp = now => ({ ...blankSchedule(), due: 0, mod: now });
+// A word joins speaking once its reading memory is stable: with FSRS-5 defaults, the first passed
+// review after graduating, or graduating with Easy.
+const spUnlocked = c => c.state === REVIEW && c.stability >= SP_UNLOCK_S;
+// Once speaking has started, the word stays in it even if the reading side lapses later.
+const spEligible = c => !!(state.settings.speakCards && c.practice && c.english && ((c.sp && c.sp.state !== NEW) || spUnlocked(c)));
+const schedOf = (c, dir) => dir === 's' ? (c.sp || blankSp(0)) : c;
 function addLog(day, entry) {
   state.logs.set(day, [...(state.logs.get(day) || []), entry]);
   state.days.set(day, (state.days.get(day) || 0) + 1);
 }
-function introducedToday(day) { return new Set((state.logs.get(day) || []).filter(e => e.s === NEW).map(e => e.c)).size; }
+// Log entries: { c, g, s, t } for reading; speaking entries also have d: 's'.
+function introducedToday(day) { return new Set((state.logs.get(day) || []).filter(e => !e.d && e.s === NEW).map(e => e.c)).size; }
+function spIntroducedToday(day) { return new Set((state.logs.get(day) || []).filter(e => e.d === 's' && e.s === NEW).map(e => e.c)).size; }
 function newLimit(day) { const x = state.settings.extra || {}; return (state.settings.newPerDay | 0) + (x.day === day ? (x.n | 0) : 0); }
 const cardTexts = c => [c.hanzi, ...(c.sentences || []).map(s => s.zh)].filter(Boolean);
 const allTexts = () => { const out = []; for (const c of state.cards.values()) if (c.practice) out.push(...cardTexts(c)); return out; };
@@ -303,25 +334,34 @@ function deleteFolder(id) {
   saveLocal(); Sync.soon(3000);
 }
 
+// Queue items are { id, dir, due, c }: dir 'r' is reading (hanzi → meaning), 's' is speaking (English → say it).
 function queues(now, scoped = true) {
-  const nds = nextDayStart(now), day = dayKey(now);
-  const learnNow = [], learnSoon = [], rev = [], fresh = [];
+  const nds = nextDayStart(now), day = dayKey(now), ds = dayStart(now);
+  const learnNow = [], learnSoon = [], rev = [], fresh = [], spFresh = [];
+  const speak = state.settings.speakCards && !(scoped && cram);
   for (const c of state.cards.values()) {
     if (!inScope(c, scoped)) continue;
-    if (c.state === NEW) fresh.push(c);
-    else if (c.state === LEARNING || c.state === RELEARNING) (c.due <= now ? learnNow : learnSoon).push(c);
-    else if (c.due < nds) rev.push(c);
+    const it = { id: c.id, dir: 'r', due: c.due, c };
+    if (c.state === NEW) fresh.push(it);
+    else if (c.state === LEARNING || c.state === RELEARNING) (c.due <= now ? learnNow : learnSoon).push(it);
+    else if (c.due < nds) rev.push(it);
+    if (!speak || !spEligible(c)) continue;
+    // Never both directions of a word on the same day: the speaking item waits for a later day.
+    if ((c.last && c.last >= ds) || c.state === LEARNING || c.state === RELEARNING || c.due < nds) continue;
+    const sp = c.sp;
+    if (!sp || sp.state === NEW) spFresh.push({ id: c.id, dir: 's', due: 0, c });
+    else if (sp.state === LEARNING || sp.state === RELEARNING) (sp.due <= now ? learnNow : learnSoon).push({ id: c.id, dir: 's', due: sp.due, c });
+    else if (sp.due < nds) rev.push({ id: c.id, dir: 's', due: sp.due, c });
   }
   const byDue = (a, b) => a.due - b.due;
-  learnNow.sort(byDue); learnSoon.sort(byDue); rev.sort(byDue); fresh.sort((a, b) => a.created - b.created);
+  learnNow.sort(byDue); learnSoon.sort(byDue); rev.sort(byDue); fresh.sort((a, b) => a.c.created - b.c.created);
+  spFresh.sort((a, b) => b.c.stability - a.c.stability);          // the best-known words first
   const newLeft = Math.max(0, newLimit(day) - introducedToday(day));
-  return { learnNow, learnSoon, rev, fresh: fresh.slice(0, newLeft), freshTotal: fresh.length, newLeft, nds };
+  const spLeft = Math.max(0, (state.settings.speakNewPerDay | 0) - spIntroducedToday(day));
+  return { learnNow, learnSoon, rev, fresh: fresh.slice(0, newLeft), freshTotal: fresh.length, newLeft, spFresh: spFresh.slice(0, spLeft), nds };
 }
 function pickNext(q) {
-  if (q.learnNow.length) return q.learnNow[0].id;
-  if (q.rev.length) return q.rev[0].id;
-  if (q.fresh.length) return q.fresh[0].id;
-  return null;
+  return q.learnNow[0] || q.rev[0] || q.fresh[0] || q.spFresh[0] || null;
 }
 
 /* ---------- pinyin ---------- */
@@ -735,6 +775,8 @@ function mergeEntries(a, b) {
   }
   return [...m.values()].sort((x, y) => x.t - y.t);
 }
+const spMod = sp => (sp && sp.mod) || 0;
+const spNewer = (a, b) => spMod(a) > spMod(b);       // on a tie, the existing side stays
 function mergeRemote(R) {
   if (!R || typeof R !== 'object' || R.app !== 'jiyi') return { local: false, push: true };
   let local = false, push = false;
@@ -749,7 +791,16 @@ function mergeRemote(R) {
     let win = l;
     if (r && (!l || r.mod > l.mod)) win = r;
     if (win && (state.tomb.get(id) || 0) >= win.mod) win = null;
-    if (win !== l) { if (win) state.cards.set(id, win); else state.cards.delete(id); local = true; }
+    let changed = win !== l;
+    if (win && l && r) {
+      // The speaking side merges on its own mod, so a review on either side survives an edit on the other
+      // (and a device on an older version, which drops sp, can't wipe it).
+      const sp = spNewer(r.sp, l.sp) ? r.sp : l.sp;
+      if (win.sp !== sp) win = { ...win, sp };
+      if (sp !== l.sp) changed = true;
+      if (spMod(sp) !== spMod(r.sp)) push = true;
+    }
+    if (changed) { if (win) state.cards.set(id, win); else state.cards.delete(id); local = true; }
     if ((win && (!r || r.mod !== win.mod)) || (!win && r)) push = true;
   }
 
@@ -913,7 +964,7 @@ function highlight(zh, word) {
   if (!word || !zh.includes(word)) return esc(zh);
   return zh.split(word).map(esc).join(`<mark>${esc(word)}</mark>`);
 }
-function answerHTML(c, animate) {
+function answerHTML(c, animate, extra) {
   const say = esc(c.hanzi);
   const speakOn = azureReady();
   const ex = (c.sentences || []).map(s => `
@@ -938,14 +989,52 @@ function answerHTML(c, animate) {
       ${speakOn ? `<button class="pill" data-act="assess" data-ref="${say}">${ICON.mic}Say it</button>` : ''}
     </div>
     ${c.english ? `<p class="en">${esc(c.english)}</p>` : ''}
+    ${extra || ''}
     ${c.notes ? `<p class="notes">${esc(c.notes)}</p>` : ''}
     ${speakOn ? '<div class="pa" data-pa hidden></div>' : ''}
     ${ex ? `<div class="ex-wrap"><h3 class="sub">Examples</h3>${ex}</div>` : ''}
   </div>`;
 }
+/* ---------- speaking cards ---------- */
+// Empty 田字格 cells, one per character, so you know how long the word is.
+function spCells(c) {
+  const chars = Array.from((c.hanzi || '').replace(/\s+/g, ''));
+  const n = chars.length, label = `${n} ${plural(n, 'character')}`;
+  if (n && n <= 6 && chars.every(ch => HAN.test(ch))) {
+    return `<div class="tzg sp-cells" style="--n:${n}" role="img" aria-label="${label}">${chars.map(() => `<span class="cell empty">${GRID_SVG}</span>`).join('')}</div>`;
+  }
+  return `<p class="sp-count">${label}</p>`;
+}
+// A hint from the example sentences: the sentence with the word blanked out, or else just an English translation.
+function spHint(c) {
+  const ss = c.sentences || [], w = (c.hanzi || '').trim();
+  const hit = w && ss.find(x => x.zh.includes(w));
+  if (hit) return { en: hit.en, zh: hit.zh.split(w).join('＿'.repeat(Array.from(w.replace(/\s+/g, '')).length)) };
+  const en = ss.find(x => x.en);
+  return en ? { en: en.en, zh: '' } : null;
+}
+function spHintHTML(h) {
+  return `<div class="sp-hint">${h.zh ? `<p class="sp-hint-zh" lang="zh-CN">${esc(h.zh)}</p>` : ''}${h.en ? `<p class="sp-hint-en">${esc(h.en)}</p>` : ''}</div>`;
+}
+// Other words with the same English, so a different right answer isn't graded as wrong.
+function sameMeaningHTML(c) {
+  const key = (c.english || '').trim().toLowerCase();
+  if (!key) return '';
+  const same = [...state.cards.values()].filter(x => x.id !== c.id && (x.english || '').trim().toLowerCase() === key).slice(0, 6);
+  if (!same.length) return '';
+  return `<p class="sp-same">Same meaning: ${same.map(x => `<span lang="zh-CN">${esc(x.hanzi)}</span>${x.pinyin ? ' ' + esc(x.pinyin) : ''}`).join(', ')}</p>`;
+}
+function showHint() {
+  if (!study.id || study.revealed || study.dir !== 's' || study.hinted) return;
+  const c = state.cards.get(study.id);
+  if (!c || !spHint(c)) return;
+  study.hinted = true;
+  renderStudy();
+}
+
 function countsHTML(q) {
   return `<div class="counts">
-    <span><b class="c-new">${q.fresh.length}</b>new</span>
+    <span><b class="c-new">${q.fresh.length + q.spFresh.length}</b>new</span>
     <span><b class="c-learn">${q.learnNow.length}</b>learning</span>
     <span><b class="c-rev">${q.rev.length}</b>to review</span>
     ${lastUndo ? '<button class="link undo" data-act="undo">Undo</button>' : ''}
@@ -970,7 +1059,7 @@ function startCram(fid) {
   if (!ids.length) { toast('This folder has no practice words yet.'); return; }
   cram = { fid, order: ids, total: ids.length };
   prefs.scope = fid; savePrefs();
-  study = { id: null, revealed: false, animate: false };
+  study = { id: null, dir: 'r', revealed: false, animate: false };
   if (currentView === 'study') renderStudy(); else showView('study');
 }
 function renderStudy() {
@@ -978,11 +1067,17 @@ function renderStudy() {
   const now = Date.now();
   const q = queues(now);
   clearTimeout(refreshTimer);
-  if (study.id && !state.cards.has(study.id)) study = { id: null, revealed: false, animate: false };
+  if (study.id) {
+    const sc = state.cards.get(study.id);
+    if (!sc || (study.dir === 's' && (!state.settings.speakCards || !sc.english))) study = { id: null, dir: 'r', revealed: false, animate: false };
+  }
   if (cram) {
     cram.order = cram.order.filter(id => { const c = state.cards.get(id); return c && c.practice; });
-    if (!study.id) study = { id: cram.order[0] || null, revealed: false, animate: false, fresh: true };
-  } else if (!study.id) study = { id: pickNext(q), revealed: false, animate: false, fresh: true };
+    if (!study.id) study = { id: cram.order[0] || null, dir: 'r', revealed: false, animate: false, fresh: true };
+  } else if (!study.id) {
+    const it = pickNext(q);
+    study = { id: it ? it.id : null, dir: it ? it.dir : 'r', revealed: false, animate: false, fresh: true };
+  }
 
   if (!state.cards.size) {
     el.innerHTML = `<div class="empty">
@@ -1026,8 +1121,19 @@ function renderStudy() {
     return;
   }
   const c = state.cards.get(study.id);
-  const badge = c.state === NEW ? '<span class="badge">New</span>' : c.state === RELEARNING ? '<span class="badge relearn">Relearning</span>' : '';
-  if (!study.revealed) {
+  const speaking = study.dir === 's', sch = schedOf(c, study.dir);
+  const badge = (sch.state === NEW ? '<span class="badge">New</span>' : sch.state === RELEARNING ? '<span class="badge relearn">Relearning</span>' : '') +
+    (speaking ? '<span class="badge speak">Speak</span>' : '');
+  if (!study.revealed && speaking) {
+    // English on the front, no audio: you say the word yourself, then flip.
+    const hint = spHint(c);
+    el.innerHTML = head + `<div class="study-card sp-card" data-act="show" role="button" tabindex="0" aria-label="Show answer">${badge}
+      <p class="sp-prompt">${esc(c.english)}</p>${spCells(c)}${study.hinted && hint ? spHintHTML(hint) : ''}<p class="tap-hint">Say it aloud, then tap</p></div>`;
+    setActions(hint && !study.hinted
+      ? '<div class="sp-acts"><button class="btn secondary" data-act="sp-hint">Hint</button><button class="btn" data-act="show">Show answer</button></div>'
+      : '<button class="btn" data-act="show">Show answer</button>');
+    study.fresh = false;
+  } else if (!study.revealed) {
     const mode = autoplayMode(), say = esc(c.hanzi);
     const frontAudio = mode === 'front' ? `<div class="audio-row">
         <button class="pill" id="front-listen" data-act="say" data-say="${say}">${ICON.play}Listen</button>
@@ -1042,11 +1148,12 @@ function renderStudy() {
       if (mode === 'front' && unlocked) { study.heard = true; speak(c.hanzi, false, $('#front-listen')); }
     }
   } else {
-    el.innerHTML = head + `<div class="study-card is-back">${badge}${hanziBlock(c, true)}${answerHTML(c, study.animate)}</div>
+    el.innerHTML = head + `<div class="study-card is-back${speaking ? ' sp-card' : ''}">${badge}${hanziBlock(c, true)}${answerHTML(c, study.animate, speaking ? sameMeaningHTML(c) : '')}</div>
       <div class="card-tools"><button class="link" data-act="edit-current">Edit card</button></div>`;
-    const pv = previewAll(c, now);
+    const pv = previewAll(sch, now);
     const names = ['Again', 'Hard', 'Good', 'Easy'];
-    setActions(`<div class="rates">${pv.map((r, i) => `<button class="rate g${i + 1}" data-act="rate" data-g="${i + 1}"><small>${ivlLabel(r)}</small>${names[i]}</button>`).join('')}</div>`);
+    const n = speaking && study.hinted ? 2 : 4;            // after a hint, Hard is the best grade
+    setActions(`<div class="rates${n === 2 ? ' two' : ''}">${pv.slice(0, n).map((r, i) => `<button class="rate g${i + 1}" data-act="rate" data-g="${i + 1}"><small>${ivlLabel(r)}</small>${names[i]}</button>`).join('')}</div>`);
   }
   study.animate = false;
 }
@@ -1056,10 +1163,10 @@ function doneHTML(q, now, inScopeN) {
   if (soon) next = `Next card in ${Math.max(1, Math.round((soon.due - now) / MIN))} min.`;
   else {
     let tomorrow = 0, first = null;
+    const count = due => { if (due < q.nds + DAY) tomorrow++; if (first == null || due < first) first = due; };
     for (const c of state.cards.values()) {
-      if (c.state !== REVIEW) continue;
-      if (c.due < q.nds + DAY) tomorrow++;
-      if (first == null || c.due < first) first = c.due;
+      if (c.state === REVIEW) count(c.due);
+      if (c.sp && c.sp.state === REVIEW && spEligible(c)) count(c.sp.due);
     }
     if (tomorrow) next = `Tomorrow: ${tomorrow} ${plural(tomorrow, 'card')} to review.`;
     else if (first) { const d = daysBetween(now, first); next = `Next review in ${d} ${plural(d, 'day')}.`; }
@@ -1083,41 +1190,55 @@ function reveal() {
   renderStudy();
   const c = state.cards.get(study.id);
   const mode = autoplayMode();
-  if (c && (mode === 'back' || (mode === 'front' && !study.heard))) speak(c.hanzi, false, $('.audio-row .pill'));
+  if (!c) return;
+  // A speaking card plays the word on the back unless autoplay is off, since the front was silent.
+  if (study.dir === 's' ? mode !== 'off' : (mode === 'back' || (mode === 'front' && !study.heard))) speak(c.hanzi, false, $('.audio-row .pill'));
 }
 function rate(g) {
   const c = state.cards.get(study.id);
   if (!c || !study.revealed) return;
+  const dir = study.dir === 's' ? 's' : 'r';
+  if (dir === 's' && study.hinted && g > 2) return;
   const now = Date.now();
-  const r = previewAll(c, now)[g - 1];
-  const next = { ...r.card, last: now, reps: (c.reps || 0) + 1 };
-  if (next.state === REVIEW && r.ivl != null) { const f = fuzz(r.ivl); next.ivl = f; next.due = dayOffset(now, f); }
+  const sch = schedOf(c, dir);
+  const r = previewAll(sch, now)[g - 1];
+  const res = { ...r.card, last: now, reps: (sch.reps || 0) + 1 };
+  if (res.state === REVIEW && r.ivl != null) { const f = fuzz(r.ivl); res.ivl = f; res.due = dayOffset(now, f); }
+  // Speaking only changes sp; the reading schedule stays as it is.
+  const next = dir === 's' ? { ...c, sp: {
+    state: res.state, due: res.due, stability: res.stability, difficulty: res.difficulty, step: res.step,
+    ivl: res.ivl, reps: res.reps, lapses: res.lapses, last: res.last, mod: now
+  } } : res;
   const day = dayKey(now);
-  lastUndo = { prev: JSON.parse(JSON.stringify(c)), day, key: c.id + ':' + now, g, cram: !!cram };
+  lastUndo = { prev: JSON.parse(JSON.stringify(c)), day, key: c.id + ':' + now, g, cram: !!cram, dir };
   if (cram && cram.order[0] === c.id) { cram.order.shift(); if (g === 1) cram.order.push(c.id); }
   state.cards.set(c.id, next);
-  addLog(day, { c: c.id, g, s: c.state, t: now });
+  addLog(day, dir === 's' ? { c: c.id, g, s: sch.state, t: now, d: 's' } : { c: c.id, g, s: c.state, t: now });
   persistCard(c.id);
   stopAudio();
-  study = { id: null, revealed: false, animate: false };
+  study = { id: null, dir: 'r', revealed: false, animate: false };
   renderStudy();
   $('#main').scrollTop = 0;
 }
 function undo() {
   if (!lastUndo) return;
   const { prev, day, key, g } = lastUndo;
-  const wasCram = lastUndo.cram;
+  const wasCram = lastUndo.cram, dir = lastUndo.dir === 's' ? 's' : 'r';
   lastUndo = null;
   if (wasCram && cram) {
     if (g === 1) { const i = cram.order.lastIndexOf(prev.id); if (i >= 0) cram.order.splice(i, 1); }
     cram.order.unshift(prev.id);
   }
-  state.cards.set(prev.id, normalizeCard(prev));
-  state.undone.set(key, Date.now());
+  const now = Date.now();
+  const back = normalizeCard(prev);
+  // The restored speaking side gets a new mod, so the undo wins the next sync merge.
+  if (dir === 's') back.sp = back.sp ? { ...back.sp, mod: now } : blankSp(now);
+  state.cards.set(prev.id, back);
+  state.undone.set(key, now);
   state.logs.set(day, (state.logs.get(day) || []).filter(e => (e.c + ':' + e.t) !== key));
   state.days.set(day, Math.max(0, (state.days.get(day) || 0) - 1));
   persistCard(prev.id);
-  study = { id: prev.id, revealed: false, animate: false, fresh: true };
+  study = { id: prev.id, dir, revealed: false, animate: false, fresh: true };
   renderStudy();
   toast('Last answer undone');
 }
@@ -1138,7 +1259,7 @@ function addExampleCard() {
   state.cards.set(c.id, c);
   persistCard(c.id, false, 3000);
   Prefetch.add(cardTexts(c));
-  study = { id: null, revealed: false, animate: false };
+  study = { id: null, dir: 'r', revealed: false, animate: false };
   renderStudy();
 }
 
@@ -1506,10 +1627,19 @@ function openEditor(id) {
     const r = c.last ? Math.round(retr(Math.max(0, (now - c.last) / DAY), c.stability) * 100) : null;
     info = `This card is ${due}. Memory stability is ${c.stability < 1 ? c.stability.toFixed(2) : c.stability.toFixed(1)} days and difficulty ${c.difficulty.toFixed(1)} out of 10${r != null ? `; estimated recall right now ${r}%` : ''}. Reviewed ${c.reps} ${plural(c.reps, 'time')}, forgotten ${c.lapses} ${plural(c.lapses, 'time')}.`;
   }
+  let spInfo = '';
+  if (state.settings.speakCards) {
+    const sp = c.sp;
+    if (sp && sp.state === REVIEW) { const dd = daysBetween(now, sp.due); spInfo = sp.due < nextDayStart(now) ? 'due today' : `due in ${dd} ${plural(dd, 'day')}`; }
+    else if (sp && sp.state !== NEW) spInfo = 'in learning steps';
+    else if (!c.english) spInfo = 'needs an English meaning';
+    else spInfo = spUnlocked(c) ? 'new' : 'not unlocked yet';
+    spInfo = 'Speaking: ' + spInfo;
+  }
   sheet.innerHTML = `<div class="sheet-head"><button class="link" data-act="sheet-close">Cancel</button><strong>Edit card</strong><button class="link strong" data-act="sheet-save">Save</button></div>
     <div class="sheet-body wrap"></div>`;
   const body = $('.sheet-body', sheet);
-  body.insertAdjacentHTML('beforeend', `<p class="sched-info">${esc(info)}</p>`);
+  body.insertAdjacentHTML('beforeend', `<p class="sched-info">${esc(info)}${spInfo ? `<br>${esc(spInfo)}` : ''}</p>`);
   body.appendChild(form.el);
   body.insertAdjacentHTML('beforeend', `<button class="btn" data-act="sheet-save">Save changes</button>
     <div class="danger-zone"><button class="link" data-act="reset-card">Reset progress</button><button class="link danger" data-act="delete-card">Delete card</button></div>`);
@@ -1543,7 +1673,7 @@ function saveEditor() {
 function deleteCard(id) {
   state.cards.delete(id);
   persistCard(id, true);
-  if (study.id === id) study = { id: null, revealed: false, animate: false };
+  if (study.id === id) study = { id: null, dir: 'r', revealed: false, animate: false };
   if (lastUndo && lastUndo.prev.id === id) lastUndo = null;
   closeEditor();
   toast('Card deleted');
@@ -1552,9 +1682,10 @@ function deleteCard(id) {
 function resetCard(id) {
   const c = state.cards.get(id);
   if (!c) return;
-  state.cards.set(id, normalizeCard({ ...c, ...blankSchedule(), updated: Date.now() }));
+  const now = Date.now();
+  state.cards.set(id, normalizeCard({ ...c, ...blankSchedule(), sp: blankSp(now), updated: now }));
   persistCard(id, false, 3000);
-  if (study.id === id) study = { id: null, revealed: false, animate: false };
+  if (study.id === id) study = { id: null, dir: 'r', revealed: false, animate: false };
   closeEditor();
   toast('Progress reset. The card is new again.');
   dataChanged();
@@ -1740,12 +1871,25 @@ function renderStats() {
     const idx = c.due < q.nds ? 0 : Math.round((dayStart(c.due) - ds0) / DAY);
     if (idx >= 0 && idx < 14) fc[idx]++;
   }
-  fc[0] += q.fresh.length;
-  const dueToday = q.rev.length + q.learnNow.length + q.fresh.length;
+  // speaking: forecast, and words you can say
+  let spAny = false, canSay = 0;
+  for (const c of state.cards.values()) {
+    if (c.sp) spAny = true;
+    if (c.practice && c.sp && c.sp.state === REVIEW) canSay++;
+    if (!c.sp || c.sp.state === NEW || !spEligible(c)) continue;
+    const idx = c.sp.due < q.nds ? 0 : Math.round((dayStart(c.sp.due) - ds0) / DAY);
+    if (idx >= 0 && idx < 14) fc[idx]++;
+  }
+  fc[0] += q.fresh.length + q.spFresh.length;
+  const dueToday = q.rev.length + q.learnNow.length + q.fresh.length + q.spFresh.length;
   const reviewedToday = (state.logs.get(today) || []).length;
-  let pass = 0, tot = 0;
+  let pass = 0, tot = 0, spPass = 0, spTot = 0;
   const cutoff = dayKey(now - 30 * DAY);
-  for (const [k, arr] of state.logs) if (k > cutoff) for (const e of arr) if (e.s === REVIEW) { tot++; if (e.g > 1) pass++; }
+  for (const [k, arr] of state.logs) if (k > cutoff) for (const e of arr) {
+    if (e.s !== REVIEW) continue;
+    if (e.d === 's') { spTot++; if (e.g > 1) spPass++; } else if (!e.d) { tot++; if (e.g > 1) pass++; }
+  }
+  const showSpeak = state.settings.speakCards || spAny;
   const studied = k => (state.logs.get(k) || []).length > 0 || (state.days.get(k) || 0) > 0;
   let streak = 0;
   for (let i = studied(today) ? 0 : 1; i < 3650; i++) {
@@ -1809,6 +1953,15 @@ function renderStats() {
       ${tot >= 10 ? `<p class="big">${Math.round(pass / tot * 100)}%</p><p class="muted" style="font-size:14px">Share of reviews you didn’t answer Again, across ${tot} ${plural(tot, 'review')}. Your target is ${Math.round(state.settings.retention * 100)}%.</p>`
         : `<p class="muted">Shows up after 10 reviews of graduated cards${tot ? ` (${tot} so far)` : ''}.</p>`}
     </section>
+    ${showSpeak ? `<section class="stat-sec">
+      <h2 class="h2">Speaking</h2>
+      <p class="big">Can say ${canSay} <span class="muted" style="font-size:16px;font-weight:500">of ${practN} practice ${plural(practN, 'word')}</span></p>
+      <div class="meter"><i style="width:${practN ? canSay / practN * 100 : 0}%"></i></div>
+      <p class="muted" style="font-size:14px">Words past the speaking learning steps: you see the English and say the Chinese.</p>
+      ${spTot >= 10 ? `<p class="big" style="margin-top:14px">${Math.round(spPass / spTot * 100)}%</p><p class="muted" style="font-size:14px">Speaking retention over the last 30 days, across ${spTot} ${plural(spTot, 'review')}.</p>`
+        : `<p class="muted" style="font-size:14px;margin-top:10px">Speaking retention shows up after 10 speaking reviews${spTot ? ` (${spTot} so far)` : ''}.</p>`}
+      ${state.settings.speakCards ? '' : '<p class="muted" style="font-size:14px;margin-top:6px">Speaking cards are off. Turn them on in Options.</p>'}
+    </section>` : ''}
     <section class="stat-sec">
       <h2 class="h2">Next 14 days</h2>
       <div class="fc" role="img" aria-label="Cards due per day for the next 14 days: ${fc.join(', ')}">
@@ -1922,6 +2075,15 @@ function renderOptions() {
         <input type="range" id="opt-ret" min="0.8" max="0.97" step="0.01" value="${s.retention}" data-set="retention">
         <span class="hint">The chance of remembering a card when it comes due. Higher means shorter intervals and more reviews. 90% is a good balance. Changes apply from each card’s next review.</span>
       </div>
+      <label class="switch field"><span>Speaking cards<span class="hint">Some reviews show the English. Say the Chinese word aloud, then flip. A word joins after you’ve passed its first review a few days after learning it. Speaking has its own schedule and doesn’t change your reading progress.</span></span><input type="checkbox" data-set="speakCards"${s.speakCards ? ' checked' : ''}></label>
+      <div class="field" id="sp-new-field" style="margin-top:12px"${s.speakCards ? '' : ' hidden'}>
+        <label class="lbl" for="opt-spnew">New speaking cards per day</label>
+        <div class="stepper">
+          <button type="button" data-act="num" data-d="-5" aria-label="Five fewer">−</button>
+          <input class="in" id="opt-spnew" type="number" inputmode="numeric" min="0" max="999" value="${s.speakNewPerDay}" data-set="speakNewPerDay">
+          <button type="button" data-act="num" data-d="5" aria-label="Five more">+</button>
+        </div>
+      </div>
     </section>
     <section class="opt-sec">
       <h2 class="h2">Adding words</h2>
@@ -1973,6 +2135,7 @@ function renderOptions() {
       <h2 class="h2">How scheduling works</h2>
       <p>Cards are scheduled with FSRS-5, the memory model built into Anki. Each card tracks how stable your memory of it is and how hard the word is for you, and comes back when your chance of recalling it drops to your target retention.</p>
       <p>New cards go through two short steps, 1 and 10 minutes, before their first interval of a few days. A card you forget gets a 10-minute relearning step. Grade honestly: Hard means you recalled it with real effort, Again means you didn’t.</p>
+      <p>Speaking cards show the English. Say the word out loud before you flip. A wrong tone counts as wrong, so grade Again. After using a hint, Hard is the best grade.</p>
     </section>
     <section class="opt-sec">
       <h2 class="h2">About</h2>
@@ -2053,7 +2216,10 @@ async function handleImport(input) {
     const c = normalizeCard(raw);
     if (state.tomb.has(c.id)) { c.mod = Date.now(); state.tomb.delete(c.id); }
     const l = state.cards.get(c.id);
-    if (!l || c.mod >= l.mod) state.cards.set(c.id, c);
+    if (!l || c.mod >= l.mod) {
+      if (l && !spNewer(c.sp, l.sp)) c.sp = l.sp;
+      state.cards.set(c.id, c);
+    }
     n++;
   }
   if (obj && obj.logs && typeof obj.logs === 'object' && !Array.isArray(obj.logs)) {
@@ -2579,6 +2745,7 @@ document.addEventListener('click', e => {
   if (!t) return;
   switch (t.dataset.act) {
     case 'show': reveal(); break;
+    case 'sp-hint': showHint(); break;
     case 'rate': rate(+t.dataset.g); break;
     case 'undo': undo(); break;
     case 'say': if (t.id === 'front-listen') study.heard = true; speak(t.dataset.say, t.dataset.slow === '1', t); break;
@@ -2609,7 +2776,7 @@ document.addEventListener('click', e => {
     case 'folder-rename-save': { const name = ($('#folder-name').value || '').trim(); if (name) renameFolder(words.filter, name); words.tools = ''; renderCards(); break; }
     case 'folder-tools-cancel': words.tools = ''; renderFolderTools(); break;
     case 'folder-delete': { const id = words.filter; armed(t, 'Tap again to delete', () => { deleteFolder(id); words.filter = 'practice'; words.mode = 'list'; renderCards(); toast('Folder deleted. Its words are still in All words.'); }); break; }
-    case 'folder-study': prefs.scope = words.filter; savePrefs(); cram = null; study = { id: null, revealed: false, animate: false }; showView('study'); break;
+    case 'folder-study': prefs.scope = words.filter; savePrefs(); cram = null; study = { id: null, dir: 'r', revealed: false, animate: false }; showView('study'); break;
     case 'pick-start': words.mode = 'pick'; renderFolderTools(); renderCardList(); break;
     case 'pick-done': words.mode = 'list'; renderCards(); break;
     case 'pick-toggle': togglePick(t); break;
@@ -2629,9 +2796,9 @@ document.addEventListener('click', e => {
     case 'assess': assess(t.dataset.ref, t); break;
     case 'bulk-add': bulkAdd(); break;
     case 'cram-start': startCram(scopeValid()); break;
-    case 'cram-stop': cram = null; study = { id: null, revealed: false, animate: false }; renderStudy(); break;
+    case 'cram-stop': cram = null; study = { id: null, dir: 'r', revealed: false, animate: false }; renderStudy(); break;
     case 'more-new': moreNew(); break;
-    case 'study-ahead': { const q = queues(Date.now()); if (q.learnSoon[0]) { study = { id: q.learnSoon[0].id, revealed: false, animate: false, fresh: true }; renderStudy(); } break; }
+    case 'study-ahead': { const it = queues(Date.now()).learnSoon[0]; if (it) { study = { id: it.id, dir: it.dir, revealed: false, animate: false, fresh: true }; renderStudy(); } break; }
     case 'export': exportData(); break;
     case 'import': $('#import-file').click(); break;
     case 'az-save': azureSave(); break;
@@ -2648,7 +2815,7 @@ document.addEventListener('click', e => {
     }); break;
     case 'sync-now': if (Sync.state === 'error') toast(Sync.msg); Sync.run(); break;
     case 'num': {
-      const inp = $('#opt-new');
+      const inp = t.closest('.stepper').querySelector('input');
       inp.value = clamp((parseInt(inp.value, 10) || 0) + (+t.dataset.d), 0, 999);
       inp.dispatchEvent(new Event('change', { bubbles: true }));
       break;
@@ -2681,7 +2848,7 @@ document.addEventListener('change', e => {
   if (t.id === 'import-words-file') { handleWordImport(t); return; }
   if (t.id === 'pick-in') { words.pickIn = t.value; renderCardList(); return; }
   if (t.id === 'deck-practice') { deckPractice = t.checked; return; }
-  if (t.id === 'scope') { prefs.scope = t.value; savePrefs(); cram = null; study = { id: null, revealed: false, animate: false }; renderStudy(); return; }
+  if (t.id === 'scope') { prefs.scope = t.value; savePrefs(); cram = null; study = { id: null, dir: 'r', revealed: false, animate: false }; renderStudy(); return; }
   if (t.dataset && t.dataset.pref === 'voice') {
     prefs.voice = t.value;
     const v = t.value.startsWith('device:') ? TTS.voices.find(x => x.voiceURI === t.value.slice(7)) : null;
@@ -2701,6 +2868,8 @@ document.addEventListener('change', e => {
     const h = $('#autoplay-hint'); if (h) h.innerHTML = AUTOPLAY_HINTS[s.autoplayWhen];
   }
   else if (k === 'autoplay' || k === 'toneColors' || k === 'autoPinyin') s[k] = t.checked;
+  else if (k === 'speakCards') { s.speakCards = t.checked; const f = $('#sp-new-field'); if (f) f.hidden = !t.checked; }
+  else if (k === 'speakNewPerDay') { s.speakNewPerDay = clamp(parseInt(t.value, 10) || 0, 0, 999); t.value = s.speakNewPerDay; }
   else if (k === 'rate') s.rate = clamp(parseFloat(t.value) || 0.9, 0.5, 1.3);
   else if (k === 'retention') s.retention = clamp(parseFloat(t.value) || 0.9, 0.8, 0.97);
   else if (k === 'newPerDay') { s.newPerDay = clamp(parseInt(t.value, 10) || 0, 0, 999); t.value = s.newPerDay; }
@@ -2720,6 +2889,7 @@ document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (!study.id) return;
   if (!study.revealed && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); reveal(); }
+  else if (!study.revealed && (e.key === 'h' || e.key === 'H') && study.dir === 's') { e.preventDefault(); showHint(); }
   else if (study.revealed && ['1', '2', '3', '4'].includes(e.key)) { e.preventDefault(); rate(+e.key); }
   else if (study.revealed && (e.key === ' ' || e.key === 'Enter') && !e.target.closest('button')) { e.preventDefault(); rate(3); }
   else if (e.key === 'z' && lastUndo) undo();
