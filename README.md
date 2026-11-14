@@ -55,6 +55,8 @@ To bring in your own list, use **Options → Import words**:
 
 Words you already have keep their progress.
 
+Stuck on a card? Tap **Hint** (or press H) to see the word in its example sentence, in Chinese, with a button to hear the sentence. After a hint, Hard is the best grade.
+
 ### Speaking cards
 
 Turn on **Options → Study → Speaking cards** to also practice the other direction: the card shows the English, you say the Chinese word out loud, then flip and grade yourself. A wrong tone counts as wrong, so grade Again. **Hint** shows an example sentence in Chinese with the word blanked out (only for words with an example sentence that contains them); after a hint, Hard is the best grade.

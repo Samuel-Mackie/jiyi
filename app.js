@@ -996,17 +996,33 @@ function answerHTML(c, animate, extra) {
     ${ex ? `<div class="ex-wrap"><h3 class="sub">Examples</h3>${ex}</div>` : ''}
   </div>`;
 }
-/* ---------- speaking cards ---------- */
-// The hint is the first example sentence that contains the word, in Chinese only, with the word blanked out.
-// Without such a sentence there's no hint.
-function spHint(c) {
+/* ---------- hints ---------- */
+// The hint is the first example sentence that contains the word, in Chinese only (no English, no pinyin).
+// Speaking cards blank the word out; reading cards underline it and add a button to hear the sentence.
+// Without such a sentence there's no hint. After a hint, Hard is the best grade.
+function cardHint(c, dir) {
   const w = (c.hanzi || '').trim();
   const hit = w && (c.sentences || []).find(x => x.zh.includes(w));
-  return hit ? { zh: hit.zh.split(w).join('＿'.repeat(Array.from(w.replace(/\s+/g, '')).length)) } : null;
+  if (!hit) return null;
+  return dir === 's' ? { zh: hit.zh.split(w).join('＿'.repeat(Array.from(w.replace(/\s+/g, '')).length)) } : { zh: hit.zh, word: w };
 }
-function spHintHTML(h) {
-  return `<div class="sp-hint"><p class="sp-hint-zh" lang="zh-CN">${esc(h.zh)}</p></div>`;
+function hintHTML(h, dir) {
+  if (dir === 's') return `<div class="card-hint"><p class="card-hint-zh" lang="zh-CN">${esc(h.zh)}</p></div>`;
+  return `<div class="card-hint"><p class="card-hint-zh" lang="zh-CN">${highlight(h.zh, h.word)}</p>
+    <button class="chip" data-act="say" data-say="${esc(h.zh)}" aria-label="Play sentence">${ICON.play}</button></div>`;
 }
+const frontActs = hint => hint && !study.hinted
+  ? '<div class="front-acts"><button class="btn secondary" data-act="hint">Hint</button><button class="btn" data-act="show">Show answer</button></div>'
+  : '<button class="btn" data-act="show">Show answer</button>';
+function showHint() {
+  if (!study.id || study.revealed || study.hinted) return;
+  const c = state.cards.get(study.id);
+  if (!c || !cardHint(c, study.dir)) return;
+  study.hinted = true;
+  renderStudy();
+}
+
+/* ---------- speaking cards ---------- */
 // Other words with the same English, so a different right answer isn't graded as wrong.
 function sameMeaningHTML(c) {
   const key = (c.english || '').trim().toLowerCase();
@@ -1014,13 +1030,6 @@ function sameMeaningHTML(c) {
   const same = [...state.cards.values()].filter(x => x.id !== c.id && (x.english || '').trim().toLowerCase() === key).slice(0, 6);
   if (!same.length) return '';
   return `<p class="sp-same">Same meaning: ${same.map(x => `<span lang="zh-CN">${esc(x.hanzi)}</span>${x.pinyin ? ' ' + esc(x.pinyin) : ''}`).join(', ')}</p>`;
-}
-function showHint() {
-  if (!study.id || study.revealed || study.dir !== 's' || study.hinted) return;
-  const c = state.cards.get(study.id);
-  if (!c || !spHint(c)) return;
-  study.hinted = true;
-  renderStudy();
 }
 
 function countsHTML(q) {
@@ -1117,12 +1126,10 @@ function renderStudy() {
     (speaking ? '<span class="badge speak">Speak</span>' : '');
   if (!study.revealed && speaking) {
     // English on the front, no audio: you say the word yourself, then flip.
-    const hint = spHint(c);
+    const hint = cardHint(c, 's');
     el.innerHTML = head + `<div class="study-card sp-card" data-act="show" role="button" tabindex="0" aria-label="Show answer">${badge}
-      <p class="sp-prompt">${esc(c.english)}</p>${study.hinted && hint ? spHintHTML(hint) : ''}<p class="tap-hint">Say it aloud, then tap</p></div>`;
-    setActions(hint && !study.hinted
-      ? '<div class="sp-acts"><button class="btn secondary" data-act="sp-hint">Hint</button><button class="btn" data-act="show">Show answer</button></div>'
-      : '<button class="btn" data-act="show">Show answer</button>');
+      <p class="sp-prompt">${esc(c.english)}</p>${study.hinted && hint ? hintHTML(hint, 's') : ''}<p class="tap-hint">Say it aloud, then tap</p></div>`;
+    setActions(frontActs(hint));
     study.fresh = false;
   } else if (!study.revealed) {
     const mode = autoplayMode(), say = esc(c.hanzi);
@@ -1130,8 +1137,9 @@ function renderStudy() {
         <button class="pill" id="front-listen" data-act="say" data-say="${say}">${ICON.play}Listen</button>
         <button class="pill" data-act="say" data-slow="1" data-say="${say}">${ICON.play}Slow</button>
       </div>` : '';
-    el.innerHTML = head + `<div class="study-card" data-act="show" role="button" tabindex="0" aria-label="Show answer">${badge}${hanziBlock(c, false)}${frontAudio}<p class="tap-hint">Tap to show the answer</p></div>`;
-    setActions('<button class="btn" data-act="show">Show answer</button>');
+    const hint = cardHint(c, 'r');
+    el.innerHTML = head + `<div class="study-card" data-act="show" role="button" tabindex="0" aria-label="Show answer">${badge}${hanziBlock(c, false)}${frontAudio}${study.hinted && hint ? hintHTML(hint, 'r') : ''}<p class="tap-hint">Tap to show the answer</p></div>`;
+    setActions(frontActs(hint));
     // Speak once when a card first appears. Before the first tap the phone blocks sound,
     // so then the word plays when the answer is shown instead.
     if (study.fresh) {
@@ -1143,7 +1151,7 @@ function renderStudy() {
       <div class="card-tools"><button class="link" data-act="edit-current">Edit card</button></div>`;
     const pv = previewAll(sch, now);
     const names = ['Again', 'Hard', 'Good', 'Easy'];
-    const n = speaking && study.hinted ? 2 : 4;            // after a hint, Hard is the best grade
+    const n = study.hinted ? 2 : 4;            // after a hint, Hard is the best grade
     setActions(`<div class="rates${n === 2 ? ' two' : ''}">${pv.slice(0, n).map((r, i) => `<button class="rate g${i + 1}" data-act="rate" data-g="${i + 1}"><small>${ivlLabel(r)}</small>${names[i]}</button>`).join('')}</div>`);
   }
   study.animate = false;
@@ -1189,7 +1197,7 @@ function rate(g) {
   const c = state.cards.get(study.id);
   if (!c || !study.revealed) return;
   const dir = study.dir === 's' ? 's' : 'r';
-  if (dir === 's' && study.hinted && g > 2) return;
+  if (study.hinted && g > 2) return;
   const now = Date.now();
   const sch = schedOf(c, dir);
   const r = previewAll(sch, now)[g - 1];
@@ -2126,7 +2134,8 @@ function renderOptions() {
       <h2 class="h2">How scheduling works</h2>
       <p>Cards are scheduled with FSRS-5, the memory model built into Anki. Each card tracks how stable your memory of it is and how hard the word is for you, and comes back when your chance of recalling it drops to your target retention.</p>
       <p>New cards go through two short steps, 1 and 10 minutes, before their first interval of a few days. A card you forget gets a 10-minute relearning step. Grade honestly: Hard means you recalled it with real effort, Again means you didn’t.</p>
-      <p>Speaking cards show the English. Say the word out loud before you flip. A wrong tone counts as wrong, so grade Again. After using a hint, Hard is the best grade.</p>
+      <p>Speaking cards show the English. Say the word out loud before you flip. A wrong tone counts as wrong, so grade Again.</p>
+      <p>Stuck? Hint shows the word’s example sentence in Chinese: with the word blanked out on speaking cards, and with the word underlined and a button to hear it on reading cards. After using a hint, Hard is the best grade.</p>
     </section>
     <section class="opt-sec">
       <h2 class="h2">About</h2>
@@ -2804,7 +2813,7 @@ document.addEventListener('click', e => {
   if (!t) return;
   switch (t.dataset.act) {
     case 'show': reveal(); break;
-    case 'sp-hint': showHint(); break;
+    case 'hint': showHint(); break;
     case 'rate': rate(+t.dataset.g); break;
     case 'undo': undo(); break;
     case 'say': if (t.id === 'front-listen') study.heard = true; speak(t.dataset.say, t.dataset.slow === '1', t); break;
@@ -2951,7 +2960,7 @@ document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (!study.id) return;
   if (!study.revealed && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); reveal(); }
-  else if (!study.revealed && (e.key === 'h' || e.key === 'H') && study.dir === 's') { e.preventDefault(); showHint(); }
+  else if (!study.revealed && (e.key === 'h' || e.key === 'H')) { e.preventDefault(); showHint(); }
   else if (study.revealed && ['1', '2', '3', '4'].includes(e.key)) { e.preventDefault(); rate(+e.key); }
   else if (study.revealed && (e.key === ' ' || e.key === 'Enter') && !e.target.closest('button')) { e.preventDefault(); rate(3); }
   else if (e.key === 'z' && lastUndo) undo();
