@@ -57,7 +57,7 @@ Words you already have keep their progress.
 
 ### Speaking cards
 
-Turn on **Options → Study → Speaking cards** to also practice the other direction: the card shows the English, you say the Chinese word out loud, then flip and grade yourself. A wrong tone counts as wrong, so grade Again. **Hint** shows an example sentence with the word blanked out; after a hint, Hard is the best grade.
+Turn on **Options → Study → Speaking cards** to also practice the other direction: the card shows the English, you say the Chinese word out loud, then flip and grade yourself. A wrong tone counts as wrong, so grade Again. **Hint** shows an example sentence in Chinese with the word blanked out (only for words with an example sentence that contains them); after a hint, Hard is the best grade.
 
 A word joins speaking after you've passed its first review a few days after learning it, and never comes up both ways on the same day. Speaking has its own schedule and its own daily limit for new cards (10 by default), and it never changes your reading progress. It doesn't need an Azure key.
 

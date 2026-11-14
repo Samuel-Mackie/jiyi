@@ -997,16 +997,15 @@ function answerHTML(c, animate, extra) {
   </div>`;
 }
 /* ---------- speaking cards ---------- */
-// A hint from the example sentences: the sentence with the word blanked out, or else just an English translation.
+// The hint is the first example sentence that contains the word, in Chinese only, with the word blanked out.
+// Without such a sentence there's no hint.
 function spHint(c) {
-  const ss = c.sentences || [], w = (c.hanzi || '').trim();
-  const hit = w && ss.find(x => x.zh.includes(w));
-  if (hit) return { en: hit.en, zh: hit.zh.split(w).join('＿'.repeat(Array.from(w.replace(/\s+/g, '')).length)) };
-  const en = ss.find(x => x.en);
-  return en ? { en: en.en, zh: '' } : null;
+  const w = (c.hanzi || '').trim();
+  const hit = w && (c.sentences || []).find(x => x.zh.includes(w));
+  return hit ? { zh: hit.zh.split(w).join('＿'.repeat(Array.from(w.replace(/\s+/g, '')).length)) } : null;
 }
 function spHintHTML(h) {
-  return `<div class="sp-hint">${h.zh ? `<p class="sp-hint-zh" lang="zh-CN">${esc(h.zh)}</p>` : ''}${h.en ? `<p class="sp-hint-en">${esc(h.en)}</p>` : ''}</div>`;
+  return `<div class="sp-hint"><p class="sp-hint-zh" lang="zh-CN">${esc(h.zh)}</p></div>`;
 }
 // Other words with the same English, so a different right answer isn't graded as wrong.
 function sameMeaningHTML(c) {
